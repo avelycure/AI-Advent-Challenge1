@@ -183,6 +183,13 @@ class LLMClient:
         if usage is not None:
             prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
             completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            # GigaChat кэширует префикс промпта и НЕ включает его в prompt_tokens:
+            # без этого слагаемого размер диалога занижается и даже уменьшается
+            # по мере роста истории. У OpenAI и DeepSeek семантика обратная —
+            # там кэшированные токены уже входят в prompt_tokens, поэтому
+            # складываем только специфичное поле Сбера.
+            precached = int(getattr(usage, "precached_prompt_tokens", 0) or 0)
+            prompt_tokens += precached
         else:
             # Некоторые прокси не возвращают usage — оцениваем сами.
             prompt_tokens = count_message_tokens(messages)
