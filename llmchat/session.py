@@ -26,6 +26,9 @@ class Message:
 class Session:
     provider: ProviderInfo
     model: ModelInfo
+    # Строка, которая уходит в поле model запроса. У Яндекса это длинный URI
+    # gpt://<каталог>/<модель>/latest, поэтому на экране показываем model.id.
+    model_ref: str = ""
     system_prompt: str = SYSTEM_PROMPT
     messages: List[Message] = field(default_factory=list)
     topic: str = DEFAULT_TOPIC
@@ -38,6 +41,10 @@ class Session:
     # Точный размер диалога по данным API и число сообщений, которое он покрывает.
     exact_context: int = 0
     exact_upto: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.model_ref:
+            self.model_ref = self.model.id
 
     # --- история -------------------------------------------------------
     def api_messages(self) -> List[Dict[str, str]]:

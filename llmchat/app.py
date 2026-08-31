@@ -12,11 +12,12 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .client import DemoClient, LLMClient, LLMError
+from .client import LLMError, make_client
 from .session import Session
 from .tokens import tokenizer_name
 from .ui import (
     HELP_TEXT,
+    ask_extra_field,
     ask_token,
     choose_model,
     choose_provider,
@@ -69,6 +70,7 @@ def enable_line_editing() -> None:
 # --------------------------------------------------------------------------
 
 def setup(console: Console, demo: bool):
+    """Провести пользователя по шагам настройки и вернуть готовое состояние."""
     show_banner(console)
     provider = choose_provider(console)
 
@@ -76,28 +78,35 @@ def setup(console: Console, demo: bool):
         console.print()
         console.print(info_panel(
             "Демонстрационный режим: запросы в сеть не уходят, ответы формирует "
-            "локальная заглушка. Ключ можно ввести любой.",
+            "локальная заглушка. Реквизиты можно ввести любые.",
             title="Режим проверки", style="yellow",
         ))
 
+    # У части провайдеров кроме ключа нужен ещё один реквизит — например,
+    # каталог Yandex Cloud, без которого не собрать адрес модели.
+    step = 2
+    extra: Optional[str] = None
+    if provider.extra_field is not None:
+        extra = ask_extra_field(console, provider)
+        step += 1
+
     client = None
     while client is None:
-        token = ask_token(console, provider, os.environ.get(provider.api_key_env))
-        factory = DemoClient if demo else LLMClient
-        candidate = factory(provider, token)
+        token = ask_token(console, provider, os.environ.get(provider.api_key_env), step=step)
+        candidate = make_client(provider, token, demo)
         console.print()
-        with console.status("[bold]Проверяю ключ…[/]", spinner="dots"):
+        with console.status("[bold]Проверяю доступ…[/]", spinner="dots"):
             try:
                 candidate.validate_key()
             except LLMError as exc:
                 console.print(error_panel(str(exc)))
                 console.print("[dim]Попробуйте ввести ключ ещё раз (Ctrl+C — выход).[/]")
                 continue
-        console.print(info_panel("[green]Ключ принят.[/]", title="Готово", style="green"))
+        console.print(info_panel("[green]Доступ подтверждён.[/]", title="Готово", style="green"))
         client = candidate
 
-    model = choose_model(console, provider)
-    return provider, model, client
+    model = choose_model(console, provider, step=step + 1)
+    return provider, model, provider.model_ref(model, extra), client
 
 
 # --------------------------------------------------------------------------
@@ -126,7 +135,7 @@ def update_topic(client, session: Session) -> None:
     ]
     try:
         completion = client.complete(
-            session.model.id, messages, max_tokens=TOPIC_MAX_TOKENS, temperature=0.3
+            session.model_ref, messages, max_tokens=TOPIC_MAX_TOKENS, temperature=0.3
         )
     except LLMError:
         return  # тема — украшение, из-за неё диалог ломать нельзя
@@ -150,6 +159,8 @@ def stats_panel(session: Session) -> RenderableType:
     table.add_column(style="bold")
     table.add_row("Провайдер", session.provider.name)
     table.add_row("Модель", session.model.id)
+    if session.model_ref != session.model.id:
+        table.add_row("Идентификатор для API", session.model_ref)
     table.add_row("Окно контекста", "{} токенов".format(fmt(session.context_limit)))
     table.add_row("Резерв под ответ", "{} токенов".format(fmt(session.model.output_reserve)))
     table.add_row("Доступно под историю", "{} токенов".format(fmt(session.input_budget)))
@@ -236,7 +247,7 @@ def chat_loop(console: Console, client, session: Session) -> None:
         try:
             with console.status("[bold]{} думает…[/]".format(session.model.id), spinner="dots"):
                 completion = client.complete(
-                    session.model.id,
+                    session.model_ref,
                     session.api_messages(),
                     max_tokens=session.model.output_reserve,
                 )
@@ -274,11 +285,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     console = make_console()
 
     try:
-        provider, model, client = setup(console, args.demo)
+        provider, model, model_ref, client = setup(console, args.demo)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Отменено.[/]")
         return 130
 
-    session = Session(provider=provider, model=model)
+    session = Session(provider=provider, model=model, model_ref=model_ref)
     chat_loop(console, client, session)
     return 0

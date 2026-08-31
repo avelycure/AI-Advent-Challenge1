@@ -1,11 +1,17 @@
 """Описание поддерживаемых LLM-провайдеров и их моделей.
 
-DeepSeek предоставляет OpenAI-совместимый API, поэтому оба провайдера
-обслуживаются одним и тем же SDK — различаются только base_url и список моделей.
+Все четыре провайдера принимают тело запроса в формате OpenAI, поэтому запросы
+выполняет один SDK. Различия вынесены в описание провайдера:
+
+* DeepSeek и OpenAI — ключ уходит в заголовок как есть;
+* YandexGPT — модель задаётся URI ``gpt://<каталог>/<модель>/latest``,
+  поэтому кроме ключа нужен идентификатор каталога;
+* GigaChat — ключ авторизации сначала меняется на access-токен по OAuth,
+  токен живёт 30 минут и обновляется автоматически.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 # Сколько токенов резервируем под ответ модели: на столько же выставляется
@@ -26,6 +32,25 @@ class ModelInfo:
 
 
 @dataclass(frozen=True)
+class ExtraField:
+    """Дополнительный реквизит, который нужен провайдеру помимо ключа."""
+
+    title: str
+    hint: str
+    help_text: str
+
+
+@dataclass(frozen=True)
+class OAuthInfo:
+    """Обмен долгоживущего ключа авторизации на короткий access-токен."""
+
+    url: str
+    scope: str
+    # Токен живёт 30 минут; обновляем заранее, чтобы не словить 401 в середине запроса.
+    refresh_margin_seconds: int = 120
+
+
+@dataclass(frozen=True)
 class ProviderInfo:
     key: str
     name: str
@@ -35,10 +60,24 @@ class ProviderInfo:
     accent: str
     key_hint: str
     models: List[ModelInfo]
+    # key_title — для заголовка панели, key_phrase — для середины предложения,
+    # чтобы не приходилось менять регистр на лету и не получать «api-ключ».
+    key_title: str = "API-ключ"
+    key_phrase: str = "API-ключ"
+    extra_field: Optional[ExtraField] = None
+    model_uri_template: Optional[str] = None
+    oauth: Optional[OAuthInfo] = None
+    notes: List[str] = field(default_factory=list)
 
     @property
     def default_model(self) -> ModelInfo:
         return self.models[0]
+
+    def model_ref(self, model: ModelInfo, extra: Optional[str]) -> str:
+        """Строка, которая уйдёт в поле ``model`` запроса."""
+        if self.model_uri_template and extra:
+            return self.model_uri_template.format(extra=extra, model=model.id)
+        return model.id
 
 
 PROVIDERS: Dict[str, ProviderInfo] = {
@@ -69,6 +108,56 @@ PROVIDERS: Dict[str, ProviderInfo] = {
             ModelInfo("deepseek-reasoner", "DeepSeek Reasoner — с цепочкой рассуждений", 64_000, 8_192),
         ],
     ),
+    "yandex": ProviderInfo(
+        key="yandex",
+        name="YandexGPT",
+        base_url="https://llm.api.cloud.yandex.net/v1",
+        api_key_env="YANDEX_API_KEY",
+        token_url="https://yandex.cloud/ru/docs/iam/operations/api-key/create",
+        accent="red",
+        key_hint="API-ключ сервисного аккаунта, начинается с AQVN",
+        key_title="API-ключ",
+        key_phrase="API-ключ",
+        extra_field=ExtraField(
+            title="Идентификатор каталога (folder ID)",
+            hint="выглядит как b1g…, виден в консоли Yandex Cloud",
+            help_text="Модель у Яндекса задаётся адресом gpt://<каталог>/<модель>/latest, "
+                      "поэтому кроме ключа нужен идентификатор каталога.",
+        ),
+        model_uri_template="gpt://{extra}/{model}/latest",
+        models=[
+            ModelInfo("yandexgpt-lite", "YandexGPT Lite — быстрая и дешёвая", 32_000, 2_000),
+            ModelInfo("yandexgpt", "YandexGPT Pro — сильнее и дороже", 32_000, 2_000),
+        ],
+        notes=["Ключ и каталог берутся в консоли Yandex Cloud: нужен сервисный аккаунт "
+               "с ролью ai.languageModels.user."],
+    ),
+    "gigachat": ProviderInfo(
+        key="gigachat",
+        name="GigaChat (Сбер)",
+        base_url="https://gigachat.devices.sberbank.ru/api/v1",
+        api_key_env="GIGACHAT_CREDENTIALS",
+        token_url="https://developers.sber.ru/studio/workspaces",
+        accent="bright_green",
+        key_hint="ключ авторизации из личного кабинета, длинная строка Base64",
+        key_title="Ключ авторизации",
+        key_phrase="ключ авторизации",
+        oauth=OAuthInfo(
+            url="https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+            scope="GIGACHAT_API_PERS",  # тариф для физических лиц
+        ),
+        models=[
+            ModelInfo("GigaChat-2", "GigaChat 2 Lite — быстрая, входит в бесплатный лимит", 128_000, 4_096),
+            ModelInfo("GigaChat-2-Pro", "GigaChat 2 Pro — для сложных задач", 128_000, 4_096),
+            ModelInfo("GigaChat-2-Max", "GigaChat 2 Max — самая мощная", 128_000, 4_096),
+        ],
+        notes=["Ключ авторизации меняется на access-токен по OAuth; токен живёт 30 минут "
+               "и обновляется программой автоматически.",
+               "Сервер Сбера использует сертификат НУЦ Минцифры. Если увидите ошибку "
+               "проверки сертификата, установите его командой: "
+               "curl -k https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt "
+               ">> $(python -m certifi)"],
+    ),
 }
 
-PROVIDER_ORDER: List[str] = ["deepseek", "openai"]
+PROVIDER_ORDER: List[str] = ["deepseek", "openai", "yandex", "gigachat"]

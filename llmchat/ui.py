@@ -36,7 +36,7 @@ def show_banner(console: Console) -> None:
     console.clear()
     title = Text("✨  LLM CHAT", style="bold white")
     subtitle = Text(
-        "терминальный клиент к DeepSeek и ChatGPT\n"
+        "терминальный клиент к DeepSeek, ChatGPT, YandexGPT и GigaChat\n"
         "полная история диалога · счётчики токенов · тема разговора в шапке",
         style="dim",
     )
@@ -56,15 +56,21 @@ def choose_provider(console: Console) -> ProviderInfo:
     table.add_column("№", style="bold", justify="right")
     table.add_column("Провайдер", style="bold")
     table.add_column("Модели", style="dim")
-    table.add_column("Где взять токен", style="dim")
+    table.add_column("Что нужно для доступа", style="dim")
 
     for index, key in enumerate(PROVIDER_ORDER, start=1):
         provider = PROVIDERS[key]
+        if provider.oauth is not None:
+            access = "ключ авторизации (обмен по OAuth)"
+        elif provider.extra_field is not None:
+            access = "API-ключ и {}".format(provider.extra_field.title.split(" (")[0].lower())
+        else:
+            access = "API-ключ"
         table.add_row(
             str(index),
             Text(provider.name, style=provider.accent),
             ", ".join(model.id for model in provider.models),
-            provider.token_url,
+            access,
         )
 
     console.print(Panel(table, title="Шаг 1 · Выберите LLM", title_align="left",
@@ -77,7 +83,32 @@ def choose_provider(console: Console) -> ProviderInfo:
     return PROVIDERS[PROVIDER_ORDER[int(choice) - 1]]
 
 
-def choose_model(console: Console, provider: ProviderInfo) -> ModelInfo:
+def ask_extra_field(console: Console, provider: ProviderInfo) -> str:
+    """Запросить дополнительный реквизит — например, каталог Yandex Cloud."""
+    extra = provider.extra_field
+    assert extra is not None
+
+    body = Text()
+    body.append(extra.help_text + "\n\n")
+    body.append(extra.title, style="bold")
+    body.append("\n{}".format(extra.hint), style="dim")
+
+    console.print()
+    console.print(Panel(body, title="Шаг 2 · Дополнительный реквизит", title_align="left",
+                        border_style=provider.accent, box=box.ROUNDED))
+    while True:
+        console.print()
+        value = Prompt.ask("[bold]{}[/]".format(extra.title)).strip()
+        if not value:
+            console.print("[red]Значение не может быть пустым.[/]")
+            continue
+        if not value.isascii():
+            console.print("[red]Значение должно состоять из латинских букв и цифр.[/]")
+            continue
+        return value
+
+
+def choose_model(console: Console, provider: ProviderInfo, step: int = 3) -> ModelInfo:
     table = Table(box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False)
     table.add_column("№", style="bold", justify="right")
     table.add_column("Модель", style="bold")
@@ -88,7 +119,7 @@ def choose_model(console: Console, provider: ProviderInfo) -> ModelInfo:
         table.add_row(str(index), model.id, model.label, fmt(model.context_window))
 
     console.print()
-    console.print(Panel(table, title="Шаг 3 · Выберите модель", title_align="left",
+    console.print(Panel(table, title="Шаг {} · Выберите модель".format(step), title_align="left",
                         border_style=provider.accent, box=box.ROUNDED))
     choice = Prompt.ask(
         "\n[bold]Номер модели[/]",
@@ -98,19 +129,22 @@ def choose_model(console: Console, provider: ProviderInfo) -> ModelInfo:
     return provider.models[int(choice) - 1]
 
 
-def ask_token(console: Console, provider: ProviderInfo, env_value: Optional[str]) -> str:
+def ask_token(console: Console, provider: ProviderInfo, env_value: Optional[str],
+              step: int = 2) -> str:
     body = Text()
-    body.append("Нужен персональный API-ключ ", style="")
+    body.append("Нужен {} ".format(provider.key_phrase))
     body.append(provider.name, style="bold {}".format(provider.accent))
     body.append(".\n\n")
     body.append("Получить его можно здесь:\n")
     body.append("  {}\n".format(provider.token_url), style="bold underline bright_blue")
+    for note in provider.notes:
+        body.append("\n• {}\n".format(note), style="dim")
     body.append("\nКлюч используется только для запросов к провайдеру, ", style="dim")
     body.append("никуда не сохраняется и при вводе не отображается.", style="dim")
 
     console.print()
-    console.print(Panel(body, title="Шаг 2 · Токен доступа", title_align="left",
-                        border_style=provider.accent, box=box.ROUNDED))
+    console.print(Panel(body, title="Шаг {} · {}".format(step, provider.key_title),
+                        title_align="left", border_style=provider.accent, box=box.ROUNDED))
 
     if env_value:
         console.print()
@@ -127,12 +161,20 @@ def ask_token(console: Console, provider: ProviderInfo, env_value: Optional[str]
     while True:
         console.print()
         token = Prompt.ask(
-            "[bold]Вставьте ключ[/] [dim]({})[/]".format(provider.key_hint),
+            "[bold]Вставьте {}[/] [dim]({})[/]".format(provider.key_phrase,
+                                                       provider.key_hint),
             password=True,
         ).strip()
-        if token:
-            return token
-        console.print("[red]Ключ не может быть пустым.[/]")
+        if not token:
+            console.print("[red]Ключ не может быть пустым.[/]")
+            continue
+        if not token.isascii():
+            # Кириллическая «с» вместо латинской ломает HTTP-заголовок,
+            # а ошибка при этом выглядит непонятно — ловим сразу.
+            console.print("[red]В ключе есть символы вне латиницы. Похоже, при копировании "
+                          "попала кириллическая буква — скопируйте ключ заново.[/]")
+            continue
+        return token
 
 
 def mask_key(key: str) -> str:
