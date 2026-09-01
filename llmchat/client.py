@@ -30,6 +30,9 @@ class Completion:
     text: str
     prompt_tokens: int
     completion_tokens: int
+    # Почему генерация закончилась: "stop" — модель договорила сама,
+    # "length" — упёрлась в лимит и ответ обрезан на полуслове.
+    finish_reason: str = "stop"
 
 
 # --------------------------------------------------------------------------
@@ -99,6 +102,22 @@ def describe_error(exc: Exception) -> str:
     return "{}: {}".format(name, _compact(text) or "неизвестная ошибка")
 
 
+def _unsupported_parameter(exc: Exception, kwargs: Dict[str, object]) -> bool:
+    """Убрать из запроса параметр, который провайдер не принимает.
+
+    Возвращает True, если что-то удалось убрать и запрос стоит повторить.
+    """
+    text = error_chain_text(exc).lower()
+    if "400" not in text and "unsupported" not in text and "unknown" not in text:
+        return False
+    removed = False
+    for name in ("response_format", "stop"):
+        if name in kwargs and name.replace("_", "") in text.replace("_", ""):
+            kwargs.pop(name)
+            removed = True
+    return removed
+
+
 def _endpoint_unsupported(exc: Exception) -> bool:
     """Отличить «у провайдера нет списка моделей» от настоящей проблемы.
 
@@ -150,6 +169,8 @@ class LLMClient:
         messages: List[Dict[str, str]],
         max_tokens: int,
         temperature: float = 0.7,
+        stop: Optional[List[str]] = None,
+        response_format: Optional[Dict[str, str]] = None,
     ) -> Completion:
         self._prepare()
         kwargs = {
@@ -158,6 +179,10 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if stop:
+            kwargs["stop"] = stop
+        if response_format:
+            kwargs["response_format"] = response_format
         try:
             response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -169,15 +194,24 @@ class LLMClient:
                     response = self._client.chat.completions.create(**kwargs)
                 except Exception as retry_exc:  # noqa: BLE001
                     raise LLMError(describe_error(retry_exc)) from retry_exc
+            elif _unsupported_parameter(exc, kwargs):
+                # Провайдер не знает параметр контроля — убираем и повторяем,
+                # чтобы отсутствие необязательной возможности не ломало работу.
+                try:
+                    response = self._client.chat.completions.create(**kwargs)
+                except Exception as retry_exc:  # noqa: BLE001
+                    raise LLMError(describe_error(retry_exc)) from retry_exc
             else:
                 raise LLMError(describe_error(exc)) from exc
 
         if not response.choices:
             raise LLMError("Модель вернула пустой ответ без вариантов.")
 
-        text = (response.choices[0].message.content or "").strip()
+        choice = response.choices[0]
+        text = (choice.message.content or "").strip()
         if not text:
             raise LLMError("Модель вернула пустой текст ответа.")
+        finish_reason = getattr(choice, "finish_reason", "stop") or "stop"
 
         usage = getattr(response, "usage", None)
         if usage is not None:
@@ -194,7 +228,7 @@ class LLMClient:
             # Некоторые прокси не возвращают usage — оцениваем сами.
             prompt_tokens = count_message_tokens(messages)
             completion_tokens = count_text_tokens(text)
-        return Completion(text, prompt_tokens, completion_tokens)
+        return Completion(text, prompt_tokens, completion_tokens, finish_reason)
 
 
 class GigaChatAuth:
@@ -315,13 +349,23 @@ class DemoClient:
         messages: List[Dict[str, str]],
         max_tokens: int,
         temperature: float = 0.7,
+        stop: Optional[List[str]] = None,
+        response_format: Optional[Dict[str, str]] = None,
     ) -> Completion:
         time.sleep(random.uniform(1.2, 2.2))
         last_user = next(
             (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
         )
+        system = " ".join(m.get("content", "") for m in messages if m["role"] == "system")
         if any("три-пять слов" in m.get("content", "") for m in messages):
             text = "Демонстрация работы клиента"
+        elif "ничем больше" in system:
+            # Управляемый запрос: заглушка обязана соблюдать схему.
+            text = ('{"items": [{"name": "Python", "year": 1991, "note": "читаемый синтаксис"}, '
+                    '{"name": "Go", "year": 2009, "note": "простая многозадачность"}, '
+                    '{"name": "Rust", "year": 2010, "note": "память без сборщика мусора"}, '
+                    '{"name": "JavaScript", "year": 1995, "note": "язык браузера"}, '
+                    '{"name": "Kotlin", "year": 2011, "note": "лаконичная замена Java"}]}')
         else:
             text = DEMO_REPLIES[self._counter % len(DEMO_REPLIES)]
             text = "Вы спросили: «{}».\n\n{}".format(last_user[:120], text)

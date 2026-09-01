@@ -73,9 +73,9 @@ def enable_line_editing() -> None:
 # Запуск
 # --------------------------------------------------------------------------
 
-def setup(console: Console, demo: bool, ask_keys: bool = False):
+def setup(console: Console, demo: bool, banner=None, ask_keys: bool = False):
     """Провести пользователя по шагам настройки и вернуть готовое состояние."""
-    show_banner(console)
+    (banner or show_banner)(console)
     provider = choose_provider(console)
 
     if demo:
