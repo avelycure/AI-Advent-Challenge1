@@ -89,7 +89,8 @@ def main() -> int:
             return 1
         key = path.read_text().strip()
 
-    argv = ["./compare.sh", "--step", "--format", args.format]
+    # --ask-keys: в ролике показываем ввод ключа, а не подстановку из файла.
+    argv = ["./compare.sh", "--step", "--ask-keys", "--format", args.format]
     if args.fake:
         argv.append("--demo")
 

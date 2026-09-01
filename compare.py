@@ -295,12 +295,15 @@ def main(argv=None) -> int:
                         help="не переспрашивать модель при нарушении формата")
     parser.add_argument("--step", action="store_true",
                         help="показывать результат двумя экранами, по нажатию Enter")
+    parser.add_argument("--ask-keys", action="store_true",
+                        help="не подхватывать сохранённые реквизиты, спросить их заново")
     parser.add_argument("--demo", action="store_true", help="без обращения к сети")
     args = parser.parse_args(argv)
 
     console = make_console()
     try:
-        provider, model, model_ref, client = setup(console, args.demo, banner=banner)
+        provider, model, model_ref, client = setup(console, args.demo, banner=banner,
+                                                   ask_keys=args.ask_keys)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Отменено.[/]")
         return 130
