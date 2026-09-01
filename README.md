@@ -331,6 +331,9 @@ curl -k "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt" >> $(
 python3 -m venv .venv-demo
 .venv-demo/bin/pip install -r demo/requirements.txt
 .venv-demo/bin/python demo/record_demo.py --key-file ~/.gigachat-key
+
+# параметры генерации: один вопрос, разные настройки
+.venv-demo/bin/python demo/record_params_demo.py --key-file ~/.gigachat-key
 ```
 
 Без ключа ролик можно снять на заглушке: добавьте `--fake`. Готовый файл
