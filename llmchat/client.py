@@ -25,6 +25,14 @@ class LLMError(Exception):
     """Ошибка обращения к API, уже переведённая в понятный текст."""
 
 
+class HttpProblem(Exception):
+    """Неуспешный ответ, полученный не через SDK.
+
+    Существует ради того, чтобы такой ответ проходил через тот же разбор
+    ошибок, что и исключения SDK, и не заводить вторую копию правил.
+    """
+
+
 @dataclass
 class Completion:
     text: str
@@ -79,12 +87,22 @@ def describe_error(exc: Exception) -> str:
         return ("Вместо ответа API пришла HTML-страница — запрос перехватил прокси "
                 "или фильтр сети. Добавьте адрес провайдера в NO_PROXY либо "
                 "отключите прокси для него.")
+    if ("api key not valid" in lowered or "pass a valid api key" in lowered
+            or "invalid authorization header" in lowered):
+        # Google отвечает на неверный ключ кодом 400, а не 401, как большинство.
+        return "Ключ отклонён провайдером. Проверьте его в Google AI Studio."
     if name == "AuthenticationError" or "401" in text or "invalid_api_key" in text:
         return "Ключ отклонён провайдером (401). Проверьте, что он актуален и скопирован целиком."
     if name == "PermissionDeniedError" or "403" in text:
         return "Доступ запрещён (403): у ключа нет прав на эту модель или заблокирован регион."
     if name == "NotFoundError" or "404" in text:
         return "Модель не найдена (404): проверьте, доступна ли она вашему аккаунту."
+    if "rate-limited upstream" in lowered:
+        # Бесплатные модели OpenRouter делят общую очередь: отказ означает, что
+        # сейчас занята сама модель, а не что исчерпан ваш лимит или баланс.
+        return ("Бесплатная модель сейчас перегружена на стороне провайдера. "
+                "Это не про ваш ключ и не про баланс — попробуйте позже "
+                "или выберите другую модель.")
     if name == "RateLimitError" or "429" in text:
         return "Слишком много запросов или закончился баланс (429). Попробуйте позже."
     if "402" in text or "insufficient" in text.lower() or "quota" in text.lower():
@@ -135,8 +153,25 @@ class LLMClient:
         """Точка расширения: у GigaChat здесь обновляется access-токен."""
 
     def validate_key(self) -> None:
-        """Дешёвая проверка ключа до начала диалога: список моделей."""
+        """Дешёвая проверка ключа до начала диалога."""
         self._prepare()
+
+        if self.provider.validate_url:
+            # У части провайдеров список моделей открыт без авторизации и потому
+            # ключ не проверяет — для них задан отдельный адрес проверки.
+            try:
+                response = httpx.get(
+                    self.provider.validate_url,
+                    headers={"Authorization": "Bearer " + str(self._client.api_key)},
+                    timeout=REQUEST_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001
+                raise LLMError(describe_error(exc)) from exc
+            if response.status_code >= 400:
+                problem = HttpProblem("Error code: {} - {}".format(
+                    response.status_code, _compact(response.text, 200)))
+                raise LLMError(describe_error(problem))
+            return
+
         try:
             self._client.models.list()
         except Exception as exc:  # noqa: BLE001 — переводим в свой тип

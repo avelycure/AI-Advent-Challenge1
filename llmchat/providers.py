@@ -69,6 +69,9 @@ class ProviderInfo:
     # Локальные файлы с ключом, в порядке предпочтения. Программа их только
     # читает: сама она ключи никуда не записывает.
     key_files: List[str] = field(default_factory=list)
+    # Адрес для проверки ключа. Нужен там, где список моделей открыт без
+    # авторизации и потому ключ не проверяет: у OpenRouter это именно так.
+    validate_url: Optional[str] = None
     extra_field: Optional[ExtraField] = None
     model_uri_template: Optional[str] = None
     oauth: Optional[OAuthInfo] = None
@@ -141,6 +144,51 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         notes=["Ключ и каталог берутся в консоли Yandex Cloud: нужен сервисный аккаунт "
                "с ролью ai.languageModels.user."],
     ),
+    "openrouter": ProviderInfo(
+        key="openrouter",
+        name="OpenRouter (бесплатные модели)",
+        base_url="https://openrouter.ai/api/v1",
+        api_key_env="OPENROUTER_API_KEY",
+        token_url="https://openrouter.ai/keys",
+        accent="bright_magenta",
+        key_hint="ключ начинается с sk-or-v1-",
+        key_files=["~/.openrouter-key", "~/.config/llm-chat/openrouter.key"],
+        validate_url="https://openrouter.ai/api/v1/key",
+        # Модели и размеры окон взяты из открытого каталога openrouter.ai/api/v1/models:
+        # там указана цена, и у перечисленных ниже она равна нулю за ввод и за вывод.
+        models=[
+            ModelInfo("minimax/minimax-m3:free", "MiniMax M3 — окно на миллион токенов, отвечает быстро",
+                      1_048_576, 943_718),
+            ModelInfo("z-ai/glm-5.2:free", "GLM 5.2 от Z.ai — рассуждающая модель",
+                      256_000, 230_400),
+        ],
+        notes=["Один ключ открывает модели разных разработчиков. Обе перечисленные "
+               "бесплатны: в каталоге провайдера у них нулевая цена. Ключ выдаётся "
+               "без привязки карты.",
+               "Бесплатные модели делят общую очередь и временами отвечают отказом "
+               "«перегружена». По проверке MiniMax отвечает стабильнее и быстрее, "
+               "GLM — рассуждающая модель, ей нужен max_tokens побольше."],
+    ),
+    "gemini": ProviderInfo(
+        key="gemini",
+        name="Google Gemini",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key_env="GEMINI_API_KEY",
+        token_url="https://aistudio.google.com/apikey",
+        accent="blue",
+        key_hint="ключ из Google AI Studio, начинается с AIza",
+        key_files=["~/.gemini-key", "~/.config/llm-chat/gemini.key"],
+        models=[
+            ModelInfo("gemini-3.7-flash", "Gemini 3.7 Flash — самая свежая", 1_048_576, 65_536),
+            ModelInfo("gemini-3.5-flash", "Gemini 3.5 Flash", 1_048_576, 65_536),
+            ModelInfo("gemini-2.5-flash", "Gemini 2.5 Flash — проверенная временем",
+                      1_048_576, 65_536),
+        ],
+        notes=["У Google AI Studio есть бесплатный тариф с ограничением по числу "
+               "запросов в сутки; карта для получения ключа не нужна.",
+               "Список моделей по OpenAI-совместимому пути не отдаётся, поэтому "
+               "проверка ключа откладывается до первого запроса."],
+    ),
     "gigachat": ProviderInfo(
         key="gigachat",
         name="GigaChat (Сбер)",
@@ -170,4 +218,5 @@ PROVIDERS: Dict[str, ProviderInfo] = {
     ),
 }
 
-PROVIDER_ORDER: List[str] = ["deepseek", "openai", "yandex", "gigachat"]
+PROVIDER_ORDER: List[str] = ["deepseek", "openai", "yandex", "gigachat",
+                             "openrouter", "gemini"]
