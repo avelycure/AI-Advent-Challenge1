@@ -134,6 +134,29 @@ class FrameRenderer:
         draw.text((self.padding + accent_w + 12, top + self.cell_h // 2 - 2), caption,
                   font=self.bold, fill=(205, 212, 224))
 
+    def comparison_card(self, title: str, rows) -> Image.Image:
+        """Итоговое сравнение: настройка слева, начало реального ответа справа."""
+        image = Image.new("RGB", (self.width, self.height), BACKGROUND)
+        draw = ImageDraw.Draw(image)
+        big = ImageFont.truetype(MENLO, 24, index=1)
+        draw.text(((self.width - draw.textlength(title, font=big)) // 2, self.padding + 10),
+                  title, font=big, fill=(255, 255, 255))
+
+        left_width = 34
+        y = self.padding + int(self.cell_h * 3.2)
+        for setting, answer in rows:
+            draw.text((self.padding + 8, y), setting[:left_width],
+                      font=self.bold, fill=(240, 200, 110))
+            x = self.padding + 8 + (left_width + 2) * self.cell_w
+            room = (self.width - x - self.padding) // self.cell_w
+            text = answer if len(answer) <= room else answer[:room - 1] + "…"
+            draw.text((x, y), text, font=self.regular, fill=(205, 212, 224))
+            y += int(self.cell_h * 1.5)
+            draw.line([self.padding + 8, y - int(self.cell_h * 0.4),
+                       self.width - self.padding - 8, y - int(self.cell_h * 0.4)],
+                      fill=(42, 46, 56))
+        return image
+
     def card(self, title: str, lines) -> Image.Image:
         """Заставка: заголовок и несколько строк по центру кадра."""
         image = Image.new("RGB", (self.width, self.height), BACKGROUND)

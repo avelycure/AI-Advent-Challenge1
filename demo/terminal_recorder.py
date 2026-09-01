@@ -122,6 +122,49 @@ class TerminalRecorder:
         with self._lock:
             return "\n".join(self.screen.display)
 
+    def last_answer(self, max_lines: int = 3) -> str:
+        """Достать начало последнего ответа модели прямо с экрана.
+
+        Нужно, чтобы итоговое сравнение в ролике собиралось из реально
+        прозвучавших ответов этого же прогона, а не из заранее заготовленных
+        строк. Панель ответа опознаётся по значку модели в рамке.
+        """
+        lines = self.text().splitlines()
+        start = None
+        for index, line in enumerate(lines):
+            if "🤖" in line:
+                start = index + 1
+        if start is None:
+            # Длинный ответ уезжает вверх за край экрана вместе со своей рамкой.
+            # Тогда берём то, что видно, — начало от верхней кромки до счётчиков.
+            return self._visible_body(lines, max_lines)
+        collected = []
+        for line in lines[start:]:
+            stripped = line.strip()
+            if stripped.startswith("╰") or stripped.startswith("╭"):
+                break
+            body = stripped.strip("│").strip()
+            if body:
+                collected.append(body)
+            if len(collected) >= max_lines:
+                break
+        return " ".join(collected)
+
+    @staticmethod
+    def _visible_body(lines, max_lines: int) -> str:
+        collected = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("Контекст"):
+                break
+            body = stripped.strip("│").strip()
+            if not body or body.startswith(("╭", "╰", "─")) or set(body) <= set("─│╭╰╯╮ "):
+                continue
+            collected.append(body)
+            if len(collected) >= max_lines:
+                break
+        return " ".join(collected)
+
     # --- шаги сценария ------------------------------------------------
     def wait_for(self, pattern: str, timeout: float = 30.0) -> bool:
         deadline = time.time() + timeout

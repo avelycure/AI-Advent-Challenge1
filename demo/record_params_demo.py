@@ -44,13 +44,20 @@ SHOW_PARAMS = 3.0     # сколько держим подтверждение �
 
 
 def ask(rec: TerminalRecorder, caption: str, question: str = QUESTION,
-        hold: float = SHOW_ANSWER) -> None:
-    """Задать вопрос: набрать, дать прочитать, отправить, показать ответ."""
+        hold: float = SHOW_ANSWER, collect=None, label: str = "") -> None:
+    """Задать вопрос: набрать, дать прочитать, отправить, показать ответ.
+
+    Если передан ``collect``, начало ответа снимается с экрана и попадает
+    в итоговое сравнение — так оно собирается из реально прозвучавших
+    ответов этого прогона, а не из заготовленных строк.
+    """
     rec.say(caption)
     rec.type_text(question, settle=SETTLE)
     rec.enter()
     rec.pause(0.3)
     rec.wait_idle(1.2, ANSWER_TIMEOUT)
+    if collect is not None and label:
+        collect.append((label, rec.last_answer()))
     rec.hold(hold)
 
 
@@ -71,7 +78,7 @@ def fresh(rec: TerminalRecorder) -> None:
     rec.hold(0.5)
 
 
-def build_scenario(rec: TerminalRecorder, key: str) -> None:
+def build_scenario(rec: TerminalRecorder, key: str, collected: list) -> None:
     rec.say("Реквизиты подхватываются из локального файла")
     rec.wait_for("Выберите LLM", 40)
     rec.wait_idle(0.6)
@@ -103,39 +110,52 @@ def build_scenario(rec: TerminalRecorder, key: str) -> None:
     # --- опыт 1: длина ----------------------------------------------------
     rec.narrate("Опыт 1: режу длину ответа до 40 токенов", read=3.0, cps=19)
     set_params(rec, "/change_llm_params max_tokens=40", "Ставим предел длины")
-    ask(rec, "Тот же вопрос — ответ обрывается на полуслове", hold=7.0)
+    ask(rec, "Тот же вопрос — ответ обрывается на полуслове", hold=7.0,
+        collect=collected, label="max_tokens=40")
 
-    # --- опыт 2: предсказуемость -----------------------------------------
+    # --- опыт 3: предсказуемость -----------------------------------------
     rec.say("Очищаем историю и возвращаем длину")
     fresh(rec)
-    set_params(rec, "/change_llm_params max_tokens=200 temperature=0",
+    # 120 токенов: ответ помещается на экран целиком, поэтому в итоговое
+    # сравнение попадает его начало, а не случайная середина.
+    set_params(rec, "/change_llm_params max_tokens=120 temperature=0",
                "Опыт 2 — длину вернули, случайность убрали в ноль")
-    ask(rec, "Тот же вопрос при temperature=0", hold=5.0)
+    ask(rec, "Тот же вопрос при temperature=0", hold=5.0,
+        collect=collected, label="temperature=0")
     rec.say("Очищаем историю")
     fresh(rec)
     rec.narrate("Повторяю тот же вопрос — ответ должен совпасть", read=3.0, cps=19)
-    ask(rec, "Ответ почти дословно тот же — вот что даёт нулевая температура", hold=7.0)
+    ask(rec, "Ответ почти дословно тот же — вот что даёт нулевая температура", hold=7.0,
+        collect=collected, label="temperature=0, повтор")
 
     # --- опыт 3: разброс --------------------------------------------------
     rec.say("Очищаем историю")
     fresh(rec)
     set_params(rec, "/change_llm_params temperature=1.8",
                "Опыт 3 — поднимаем случайность почти до предела")
-    ask(rec, "Тот же вопрос — при 1.8 ответ разваливается в набор слов", hold=7.0)
+    ask(rec, "Тот же вопрос при temperature=1.8", hold=5.0,
+        collect=collected, label="temperature=1.8")
+    rec.say("Очищаем историю")
+    fresh(rec)
+    rec.narrate("И снова тот же вопрос — теперь ответ будет другим", read=3.0, cps=19)
+    ask(rec, "Ответ заметно отличается — вот что даёт высокая температура", hold=7.0,
+        collect=collected, label="temperature=1.8, повтор")
 
     # --- опыт 4: формат параметром ---------------------------------------
     rec.say("Очищаем историю")
     fresh(rec)
     set_params(rec, "/change_llm_params max_tokens=150 temperature=0.3 response_format=json_object",
                "Опыт 4 — просим JSON параметром запроса")
-    ask(rec, "GigaChat параметр принял, но не применил — ответ остался прозой", hold=7.0)
+    ask(rec, "GigaChat параметр принял, но не применил — ответ остался прозой", hold=7.0,
+        collect=collected, label="response_format=json_object")
 
     # --- опыт 5: формат инструкцией ---------------------------------------
     rec.say("Очищаем историю")
     fresh(rec)
     rec.narrate("Параметр не сработал. Попрошу формат словами в вопросе", read=3.4, cps=19)
     ask(rec, "Тот же вопрос плюс требование формата — и вот он, JSON",
-        question=QUESTION_JSON, hold=7.5)
+        question=QUESTION_JSON, hold=7.5,
+        collect=collected, label="формат словами в вопросе")
 
     set_params(rec, "/reset_llm_params", "Возвращаем всё к значениям по умолчанию", hold=3.0)
     rec.type_text("/exit", settle=1.0)
@@ -163,7 +183,10 @@ def main() -> int:
     argv = ["./run.sh"] + (["--demo", "--ask-keys"] if args.fake else [])
 
     print("→ записываю сеанс…")
-    frames = record(argv, PROJECT, lambda rec: build_scenario(rec, key), COLS, ROWS, FPS)
+    collected: list = []
+    frames = record(argv, PROJECT, lambda rec: build_scenario(rec, key, collected),
+                    COLS, ROWS, FPS)
+    print("  снято ответов для сравнения: {}".format(len(collected)))
 
     renderer = FrameRenderer(COLS, ROWS, font_size=FONT_SIZE)
     title = renderer.card("Параметры генерации", [
@@ -173,13 +196,20 @@ def main() -> int:
     ])
     outro = renderer.card("Что показано", [
         "max_tokens режет длину, обрыв программа объясняет прямо",
-        "temperature=0 делает ответ повторяемым, 1.8 — разрушает его",
+        "при temperature=0 ответы совпадают, при 1.8 — расходятся",
         "response_format GigaChat принимает, но не применяет",
         "формат надёжно задаётся словами в самом вопросе",
         "изменённые параметры видны в счётчиках, /reset_llm_params возвращает всё",
     ])
+    extra_tail = []
+    if collected:
+        # Итоговое сравнение собрано из ответов этого же прогона.
+        summary = renderer.comparison_card("Один вопрос, разные параметры", collected)
+        extra_tail = [summary] * int(9.0 * FPS)
+
     build_video(frames, renderer, args.output, FPS, MAX_SEGMENT,
-                title=title, outro=outro, title_seconds=2.4, outro_seconds=3.2)
+                title=title, outro=outro, title_seconds=2.4, outro_seconds=3.2,
+                tail=extra_tail)
     return 0
 
 

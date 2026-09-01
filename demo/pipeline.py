@@ -45,7 +45,8 @@ def encode(images, path: str, fps: int) -> None:
 
 def build_video(frames: List[Frame], renderer: FrameRenderer, output: str, fps: int,
                 max_segment: float, title=None, outro=None,
-                title_seconds: float = 2.2, outro_seconds: float = 3.0) -> None:
+                title_seconds: float = 2.2, outro_seconds: float = 3.0,
+                tail=None) -> None:
     compressed = compress(frames, fps, max_segment)
     print("  после сжатия пауз: {} кадров ({:.1f} с)".format(
         len(compressed), len(compressed) / fps))
@@ -62,6 +63,9 @@ def build_video(frames: List[Frame], renderer: FrameRenderer, output: str, fps: 
 
     if title is not None:
         images = [title] * int(title_seconds * fps) + images
+    if tail:
+        # Кадры, которые показываются после записи, но до заключительной заставки.
+        images = images + list(tail)
     if outro is not None:
         images = images + [outro] * int(outro_seconds * fps)
 
