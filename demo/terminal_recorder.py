@@ -158,8 +158,15 @@ class TerminalRecorder:
         time.sleep(seconds)
         self._active = False
 
-    def type_text(self, text: str, cps: float = 32.0, echo: bool = True) -> None:
-        """Напечатать строку по символу. echo=False — для скрытого ввода ключа."""
+    def type_text(self, text: str, cps: float = 15.0, echo: bool = True,
+                  settle: float = 0.0) -> None:
+        """Напечатать строку по символу.
+
+        Скорость выбрана под зрителя, а не под машину: за быстрым набором
+        человек не успевает прочитать, что именно набирается.
+        ``settle`` — пауза после набора, чтобы строку успели прочитать
+        до нажатия Enter. ``echo=False`` — для скрытого ввода ключа.
+        """
         self._active = echo
         delay = 1.0 / cps if echo else 0.0
         for ch in text:
@@ -167,6 +174,28 @@ class TerminalRecorder:
             if delay:
                 time.sleep(delay)
         self._active = False
+        if settle:
+            self.hold(settle)
+
+    def erase(self, count: int, cps: float = 45.0) -> None:
+        """Стереть набранное посимвольно. Одно нажатие снимает один символ."""
+        self._active = True
+        for _ in range(count):
+            os.write(self.fd, b"\x7f")
+            time.sleep(1.0 / cps)
+        self._active = False
+        self.pause(0.4)
+
+    def narrate(self, text: str, read: float = 3.0, cps: float = 15.0) -> None:
+        """Обратиться к зрителю прямо в строке ввода.
+
+        Реплика набирается как обычный текст, остаётся на экране столько,
+        чтобы её успели прочитать, и стирается, не будучи отправленной.
+        Так ролик получает закадровый комментарий без звука и монтажа.
+        """
+        self.type_text(text, cps=cps)
+        self.hold(read)
+        self.erase(len(text))
 
     def enter(self) -> None:
         os.write(self.fd, b"\n")

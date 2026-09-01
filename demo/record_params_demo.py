@@ -33,103 +33,115 @@ FONT_SIZE = 15
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 QUESTION = "Опиши язык программирования Rust."
+QUESTION_JSON = QUESTION + ' Ответь только JSON: {"name":"...","year":0}'
 ANSWER_TIMEOUT = 120
 
+# Паузы подобраны под зрителя: набранную строку надо успеть прочитать до
+# нажатия Enter, а ответ — рассмотреть, прежде чем экран сменится.
+SETTLE = 1.3          # после набора строки, перед отправкой
+SHOW_ANSWER = 5.5     # сколько держим ответ на экране
+SHOW_PARAMS = 3.0     # сколько держим подтверждение смены параметров
 
-def ask(rec: TerminalRecorder, caption: str, hold: float) -> None:
-    """Задать тот же самый вопрос и дать разглядеть ответ."""
+
+def ask(rec: TerminalRecorder, caption: str, question: str = QUESTION,
+        hold: float = SHOW_ANSWER) -> None:
+    """Задать вопрос: набрать, дать прочитать, отправить, показать ответ."""
     rec.say(caption)
-    rec.type_text(QUESTION)
+    rec.type_text(question, settle=SETTLE)
     rec.enter()
     rec.pause(0.3)
     rec.wait_idle(1.2, ANSWER_TIMEOUT)
     rec.hold(hold)
 
 
-def set_params(rec: TerminalRecorder, command: str, caption: str, hold: float = 2.0) -> None:
+def set_params(rec: TerminalRecorder, command: str, caption: str,
+               hold: float = SHOW_PARAMS) -> None:
     rec.say(caption)
-    rec.type_text(command)
+    rec.type_text(command, settle=SETTLE)
     rec.enter()
     rec.wait_idle(0.8, 30)
     rec.hold(hold)
 
 
-def reset_and_set(rec: TerminalRecorder, command: str, caption: str) -> None:
-    """Очистить историю и сразу задать параметры — одним тактом.
-
-    История очищается перед каждым опытом: иначе модель видела бы свои прошлые
-    ответы и сравнение перестало бы быть честным. Отдельного такта это не стоит,
-    поэтому /new уходит без задержки.
-    """
-    rec.say(caption)
-    rec.type_text("/new")
+def fresh(rec: TerminalRecorder) -> None:
+    """Очистить историю: иначе модель увидит свои прошлые ответы."""
+    rec.type_text("/new", settle=0.6)
     rec.enter()
     rec.wait_idle(0.5, 20)
-    rec.type_text(command)
-    rec.enter()
-    rec.wait_idle(0.8, 30)
-    rec.hold(2.2)
+    rec.hold(0.5)
 
 
 def build_scenario(rec: TerminalRecorder, key: str) -> None:
     rec.say("Реквизиты подхватываются из локального файла")
     rec.wait_for("Выберите LLM", 40)
     rec.wait_idle(0.6)
-    rec.hold(1.6)
-    rec.type_text("4")
+    rec.hold(2.5)
+    rec.type_text("4", settle=1.0)
     rec.enter()
     rec.wait_for("Использовать|Вставьте", 20)
     rec.wait_idle(0.6)
-    rec.hold(2.2)
+    rec.hold(2.4)
     if rec.wait_for("Вставьте", 1):
-        rec.type_text(key, echo=False)     # запасной путь, если файла нет
+        rec.type_text(key, echo=False)
     rec.enter()
 
     rec.say("Выбираем модель")
     rec.wait_for("Выберите модель", 60)
     rec.wait_idle(0.6)
-    rec.hold(1.4)
-    rec.type_text("1")
+    rec.hold(2.5)
+    rec.type_text("1", settle=1.0)
     rec.enter()
     rec.wait_for("Диалог пуст", 15)
     rec.wait_idle(0.6)
+    rec.hold(1.2)
 
+    rec.say("Дальше — один и тот же вопрос при разных параметрах")
+    rec.narrate("Задаю один вопрос снова и снова, меняя только параметры", read=3.0, cps=19)
     set_params(rec, "/change_llm_params",
-               "Какие параметры можно менять прямо в диалоге", hold=4.5)
+               "Вот что можно менять прямо в диалоге", hold=5.5)
 
-    # --- опыт 1: как есть -------------------------------------------------
-    ask(rec, "Опыт 1 — параметры по умолчанию", hold=4.0)
+    # --- опыт 1: длина ----------------------------------------------------
+    rec.narrate("Опыт 1: режу длину ответа до 40 токенов", read=3.0, cps=19)
+    set_params(rec, "/change_llm_params max_tokens=40", "Ставим предел длины")
+    ask(rec, "Тот же вопрос — ответ обрывается на полуслове", hold=7.0)
 
-    # --- опыт 2: длина ----------------------------------------------------
-    reset_and_set(rec, "/change_llm_params max_tokens=40",
-                  "Опыт 2 — режем длину до 40 токенов (историю очищаем)")
-    ask(rec, "Тот же вопрос — ответ обрывается на полуслове", hold=4.5)
+    # --- опыт 2: предсказуемость -----------------------------------------
+    rec.say("Очищаем историю и возвращаем длину")
+    fresh(rec)
+    set_params(rec, "/change_llm_params max_tokens=200 temperature=0",
+               "Опыт 2 — длину вернули, случайность убрали в ноль")
+    ask(rec, "Тот же вопрос при temperature=0", hold=5.0)
+    rec.say("Очищаем историю")
+    fresh(rec)
+    rec.narrate("Повторяю тот же вопрос — ответ должен совпасть", read=3.0, cps=19)
+    ask(rec, "Ответ почти дословно тот же — вот что даёт нулевая температура", hold=7.0)
 
-    # --- опыт 3: предсказуемость -----------------------------------------
-    reset_and_set(rec, "/change_llm_params max_tokens=200 temperature=0",
-                  "Опыт 3 — длину вернули, случайность убрали в ноль")
-    ask(rec, "Тот же вопрос при temperature=0", hold=3.0)
-    rec.say("Повторяем тот же опыт")
-    rec.type_text("/new")
-    rec.enter()
-    rec.wait_idle(0.5, 20)
-    ask(rec, "Ответ почти дословно тот же — вот что даёт нулевая температура", hold=4.5)
+    # --- опыт 3: разброс --------------------------------------------------
+    rec.say("Очищаем историю")
+    fresh(rec)
+    set_params(rec, "/change_llm_params temperature=1.8",
+               "Опыт 3 — поднимаем случайность почти до предела")
+    ask(rec, "Тот же вопрос — при 1.8 ответ разваливается в набор слов", hold=7.0)
 
-    # --- опыт 4: разброс --------------------------------------------------
-    reset_and_set(rec, "/change_llm_params temperature=1.8",
-                  "Опыт 4 — поднимаем случайность почти до предела")
-    ask(rec, "Тот же вопрос — при 1.8 ответ разваливается в набор слов", hold=5.0)
+    # --- опыт 4: формат параметром ---------------------------------------
+    rec.say("Очищаем историю")
+    fresh(rec)
+    set_params(rec, "/change_llm_params max_tokens=150 temperature=0.3 response_format=json_object",
+               "Опыт 4 — просим JSON параметром запроса")
+    ask(rec, "GigaChat параметр принял, но не применил — ответ остался прозой", hold=7.0)
 
-    # --- опыт 5: формат ---------------------------------------------------
-    reset_and_set(rec, "/change_llm_params max_tokens=120 temperature=0.3 response_format=json_object",
-                  "Опыт 5 — просим провайдера отвечать структурой")
-    ask(rec, "GigaChat параметр принял, но не применил — ответ остался прозой", hold=5.0)
+    # --- опыт 5: формат инструкцией ---------------------------------------
+    rec.say("Очищаем историю")
+    fresh(rec)
+    rec.narrate("Параметр не сработал. Попрошу формат словами в вопросе", read=3.4, cps=19)
+    ask(rec, "Тот же вопрос плюс требование формата — и вот он, JSON",
+        question=QUESTION_JSON, hold=7.5)
 
-    set_params(rec, "/reset_llm_params", "Возвращаем всё к значениям по умолчанию", hold=2.2)
-    rec.type_text("/exit")
+    set_params(rec, "/reset_llm_params", "Возвращаем всё к значениям по умолчанию", hold=3.0)
+    rec.type_text("/exit", settle=1.0)
     rec.enter()
     rec.wait_idle(0.8, 30)
-    rec.hold(1.8)
+    rec.hold(2.0)
 
 
 def main() -> int:
@@ -163,6 +175,7 @@ def main() -> int:
         "max_tokens режет длину, обрыв программа объясняет прямо",
         "temperature=0 делает ответ повторяемым, 1.8 — разрушает его",
         "response_format GigaChat принимает, но не применяет",
+        "формат надёжно задаётся словами в самом вопросе",
         "изменённые параметры видны в счётчиках, /reset_llm_params возвращает всё",
     ])
     build_video(frames, renderer, args.output, FPS, MAX_SEGMENT,
