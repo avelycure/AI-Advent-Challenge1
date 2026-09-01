@@ -140,7 +140,8 @@ def main() -> int:
 
     print("→ записываю сеанс…")
     rec = TerminalRecorder(cols=COLS, rows=ROWS, fps=FPS)
-    argv = ["./run.sh", "--demo"] if args.fake else ["./run.sh"]
+    # --ask-keys: в ролике показываем ввод токена, а не подстановку из файла.
+    argv = ["./run.sh", "--ask-keys"] + (["--demo"] if args.fake else [])
     started = time.time()
     rec.start(argv, cwd=PROJECT)
     try:

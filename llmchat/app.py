@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 from typing import List, Optional
 
 from rich.console import Console, RenderableType
@@ -52,6 +51,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="проверочный режим без обращения к сети: ответы генерирует локальная заглушка",
     )
+    parser.add_argument(
+        "--ask-keys",
+        action="store_true",
+        help="не подхватывать сохранённые реквизиты, спросить их заново",
+    )
     return parser.parse_args(argv)
 
 
@@ -69,7 +73,7 @@ def enable_line_editing() -> None:
 # Запуск
 # --------------------------------------------------------------------------
 
-def setup(console: Console, demo: bool):
+def setup(console: Console, demo: bool, ask_keys: bool = False):
     """Провести пользователя по шагам настройки и вернуть готовое состояние."""
     show_banner(console)
     provider = choose_provider(console)
@@ -87,12 +91,12 @@ def setup(console: Console, demo: bool):
     step = 2
     extra: Optional[str] = None
     if provider.extra_field is not None:
-        extra = ask_extra_field(console, provider)
+        extra = ask_extra_field(console, provider, offer_saved=not ask_keys)
         step += 1
 
     client = None
     while client is None:
-        token = ask_token(console, provider, os.environ.get(provider.api_key_env), step=step)
+        token = ask_token(console, provider, step=step, offer_saved=not ask_keys)
         candidate = make_client(provider, token, demo)
         console.print()
         with console.status("[bold]Проверяю доступ…[/]", spinner="dots"):
@@ -285,7 +289,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     console = make_console()
 
     try:
-        provider, model, model_ref, client = setup(console, args.demo)
+        provider, model, model_ref, client = setup(console, args.demo,
+                                                   ask_keys=args.ask_keys)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Отменено.[/]")
         return 130

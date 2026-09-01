@@ -13,6 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .providers import PROVIDER_ORDER, PROVIDERS, ModelInfo, ProviderInfo
+from .secrets import find_sources, mask
 from .session import Message, Session
 
 BAR_WIDTH = 26
@@ -83,7 +84,49 @@ def choose_provider(console: Console) -> ProviderInfo:
     return PROVIDERS[PROVIDER_ORDER[int(choice) - 1]]
 
 
-def ask_extra_field(console: Console, provider: ProviderInfo) -> str:
+def choose_source(console: Console, sources, what: str, secret: bool) -> Optional[str]:
+    """Предложить готовое значение из переменной окружения или файла.
+
+    Возвращает None, если подходящего источника нет или пользователь отказался —
+    тогда значение спрашивается вручную.
+    """
+    if not sources:
+        return None
+
+    def shown(source):
+        return mask(source.value) if secret else source.value
+
+    if len(sources) == 1:
+        source = sources[0]
+        console.print()
+        if source.warning:
+            console.print("[yellow]Внимание: {}[/]".format(source.warning))
+        use = Confirm.ask(
+            "Найден {}: [bold]{}[/] ([dim]{}[/]). Использовать?".format(
+                what, source.label, shown(source)),
+            default=True)
+        return source.value if use else None
+
+    table = Table(box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False)
+    table.add_column("№", style="bold", justify="right")
+    table.add_column("Источник")
+    table.add_column("Значение", style="dim")
+    for index, source in enumerate(sources, start=1):
+        table.add_row(str(index), source.label, shown(source))
+    table.add_row("0", "ввести вручную", "")
+
+    console.print()
+    console.print(Panel(table, title="Найдено несколько источников", title_align="left",
+                        border_style="bright_blue", box=box.ROUNDED))
+    for source in sources:
+        if source.warning:
+            console.print("[yellow]Внимание: {}[/]".format(source.warning))
+    choice = Prompt.ask("\n[bold]Номер источника[/]",
+                        choices=[str(i) for i in range(0, len(sources) + 1)], default="1")
+    return None if choice == "0" else sources[int(choice) - 1].value
+
+
+def ask_extra_field(console: Console, provider: ProviderInfo, offer_saved: bool = True) -> str:
     """Запросить дополнительный реквизит — например, каталог Yandex Cloud."""
     extra = provider.extra_field
     assert extra is not None
@@ -96,6 +139,13 @@ def ask_extra_field(console: Console, provider: ProviderInfo) -> str:
     console.print()
     console.print(Panel(body, title="Шаг 2 · Дополнительный реквизит", title_align="left",
                         border_style=provider.accent, box=box.ROUNDED))
+
+    if offer_saved:
+        saved = choose_source(console, find_sources(None, extra.files),
+                              what=extra.title.split(" (")[0].lower(), secret=False)
+        if saved:
+            return saved
+
     while True:
         console.print()
         value = Prompt.ask("[bold]{}[/]".format(extra.title)).strip()
@@ -129,8 +179,8 @@ def choose_model(console: Console, provider: ProviderInfo, step: int = 3) -> Mod
     return provider.models[int(choice) - 1]
 
 
-def ask_token(console: Console, provider: ProviderInfo, env_value: Optional[str],
-              step: int = 2) -> str:
+def ask_token(console: Console, provider: ProviderInfo, step: int = 2,
+              offer_saved: bool = True) -> str:
     body = Text()
     body.append("Нужен {} ".format(provider.key_phrase))
     body.append(provider.name, style="bold {}".format(provider.accent))
@@ -140,23 +190,21 @@ def ask_token(console: Console, provider: ProviderInfo, env_value: Optional[str]
     for note in provider.notes:
         body.append("\n• {}\n".format(note), style="dim")
     body.append("\nКлюч используется только для запросов к провайдеру, ", style="dim")
-    body.append("никуда не сохраняется и при вводе не отображается.", style="dim")
+    body.append("никуда не сохраняется и при вводе не отображается.\n", style="dim")
+    if provider.key_files:
+        body.append("Чтобы не вводить его каждый раз, положите ключ в {} "
+                    "или задайте переменную {}.".format(
+                        provider.key_files[0], provider.api_key_env), style="dim")
 
     console.print()
     console.print(Panel(body, title="Шаг {} · {}".format(step, provider.key_title),
                         title_align="left", border_style=provider.accent, box=box.ROUNDED))
 
-    if env_value:
-        console.print()
-        masked = mask_key(env_value)
-        use_env = Confirm.ask(
-            "Найден ключ в переменной [bold]{}[/] ({}). Использовать его?".format(
-                provider.api_key_env, masked
-            ),
-            default=True,
-        )
-        if use_env:
-            return env_value
+    if offer_saved:
+        saved = choose_source(console, find_sources(provider.api_key_env, provider.key_files),
+                              what=provider.key_phrase, secret=True)
+        if saved:
+            return saved
 
     while True:
         console.print()
@@ -175,12 +223,6 @@ def ask_token(console: Console, provider: ProviderInfo, env_value: Optional[str]
                           "попала кириллическая буква — скопируйте ключ заново.[/]")
             continue
         return token
-
-
-def mask_key(key: str) -> str:
-    if len(key) <= 10:
-        return "*" * len(key)
-    return "{}…{}".format(key[:6], key[-4:])
 
 
 # --------------------------------------------------------------------------

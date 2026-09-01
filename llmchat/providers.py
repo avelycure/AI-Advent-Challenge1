@@ -38,6 +38,8 @@ class ExtraField:
     title: str
     hint: str
     help_text: str
+    # Файлы, откуда значение можно взять, чтобы не вводить его каждый раз.
+    files: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,9 @@ class ProviderInfo:
     # чтобы не приходилось менять регистр на лету и не получать «api-ключ».
     key_title: str = "API-ключ"
     key_phrase: str = "API-ключ"
+    # Локальные файлы с ключом, в порядке предпочтения. Программа их только
+    # читает: сама она ключи никуда не записывает.
+    key_files: List[str] = field(default_factory=list)
     extra_field: Optional[ExtraField] = None
     model_uri_template: Optional[str] = None
     oauth: Optional[OAuthInfo] = None
@@ -89,6 +94,7 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         token_url="https://platform.openai.com/api-keys",
         accent="green",
         key_hint="ключ начинается с sk-",
+        key_files=["~/.openai-key", "~/.config/llm-chat/openai.key"],
         models=[
             ModelInfo("gpt-4o-mini", "GPT-4o mini — быстрый и дешёвый", 128_000, 16_384),
             ModelInfo("gpt-4o", "GPT-4o — самый сильный из классических", 128_000, 16_384),
@@ -103,6 +109,7 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         token_url="https://platform.deepseek.com/api_keys",
         accent="magenta",
         key_hint="ключ начинается с sk-",
+        key_files=["~/.deepseek-key", "~/.llm-test-key", "~/.config/llm-chat/deepseek.key"],
         models=[
             ModelInfo("deepseek-chat", "DeepSeek Chat — универсальная модель", 64_000, 8_192),
             ModelInfo("deepseek-reasoner", "DeepSeek Reasoner — с цепочкой рассуждений", 64_000, 8_192),
@@ -118,11 +125,13 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         key_hint="API-ключ сервисного аккаунта, начинается с AQVN",
         key_title="API-ключ",
         key_phrase="API-ключ",
+        key_files=["~/.yandex-key", "~/.config/llm-chat/yandex.key"],
         extra_field=ExtraField(
             title="Идентификатор каталога (folder ID)",
             hint="выглядит как b1g…, виден в консоли Yandex Cloud",
             help_text="Модель у Яндекса задаётся адресом gpt://<каталог>/<модель>/latest, "
                       "поэтому кроме ключа нужен идентификатор каталога.",
+            files=["~/.yandex-folder", "~/.config/llm-chat/yandex.folder"],
         ),
         model_uri_template="gpt://{extra}/{model}/latest",
         models=[
@@ -142,6 +151,7 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         key_hint="ключ авторизации из личного кабинета, длинная строка Base64",
         key_title="Ключ авторизации",
         key_phrase="ключ авторизации",
+        key_files=["~/.gigachat-key", "~/.config/llm-chat/gigachat.key"],
         oauth=OAuthInfo(
             url="https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
             scope="GIGACHAT_API_PERS",  # тариф для физических лиц
