@@ -193,7 +193,7 @@ def params_panel(session: Session) -> RenderableType:
     table = Table(box=box.SIMPLE_HEAVY, expand=True, pad_edge=False)
     table.add_column("Параметр", style="bold")
     table.add_column("Значение", justify="right")
-    table.add_column("Что делает", style="dim")
+    table.add_column("Что делает и как задать")
 
     values = {
         "max_tokens": ("{} (резерв модели)".format(session.output_reserve)
@@ -207,16 +207,20 @@ def params_panel(session: Session) -> RenderableType:
     default = GenerationParams()
     for name, spec in SPECS.items():
         changed = getattr(session.params, name) != getattr(default, name)
+        explain = Text(spec.description, style="dim")
+        for example in spec.examples:
+            explain.append("\n  /change_llm_params " + example, style="cyan")
         table.add_row(
             name,
             "[bold yellow]{}[/]".format(values[name]) if changed else "[dim]{}[/]".format(values[name]),
-            spec.description,
+            explain,
         )
 
     hint = Text.from_markup(
-        "\n[dim]Изменить:[/] [bold]/change_llm_params max_tokens=200 temperature=0.3[/]\n"
-        "[dim]Сбросить:[/] [bold]/reset_llm_params[/]   "
-        "[dim]Несколько стоп-строк — через |[/]")
+        "\n[dim]Несколько параметров сразу — через пробел, несколько стоп-строк — через |[/]\n"
+        "[dim]Значение с пробелами берите в кавычки:[/] "
+        "[cyan]/change_llm_params stop=\"Вопрос пользователя:\"[/]\n"
+        "[dim]Сбросить всё:[/] [bold]/reset_llm_params[/]")
     return Panel(Group(table, hint), title="⚙ Параметры генерации", title_align="left",
                  subtitle="[dim]жёлтым — изменённые[/]", subtitle_align="right",
                  border_style="cyan", box=box.ROUNDED, padding=(0, 1))

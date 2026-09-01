@@ -92,7 +92,14 @@ def _float_in(low: float, high: float) -> Callable[[str], float]:
 def _stop_list(raw: str) -> Optional[List[str]]:
     if raw.lower() in ("none", "нет", "-"):
         return None
-    items = [part.strip() for part in raw.split("|") if part.strip()]
+    items = []
+    for part in raw.split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        # Перенос строки и табуляцию в командной строке не набрать,
+        # поэтому принимаем их привычной записью \n и \t.
+        items.append(part.replace("\\n", "\n").replace("\\t", "\t"))
     if not items:
         raise ParamError("укажите строку или несколько через |")
     if len(items) > 4:
@@ -114,26 +121,29 @@ class ParamSpec:
     name: str
     parse: Callable[[str], Any]
     description: str
-    example: str
+    examples: List[str]
 
 
 SPECS: Dict[str, ParamSpec] = {
     spec.name: spec for spec in (
         ParamSpec("max_tokens", _int_in(1, 32000),
-                  "предел длины ответа; ответ обрывается на этом месте",
-                  "max_tokens=200"),
+                  "предел длины ответа; на нём генерация обрывается",
+                  ["max_tokens=200", "max_tokens=4096"]),
         ParamSpec("temperature", _float_in(0.0, 2.0),
                   "случайность: ниже — предсказуемее, выше — разнообразнее",
-                  "temperature=0.2"),
+                  ["temperature=0", "temperature=0.7", "temperature=1.5"]),
         ParamSpec("top_p", _float_in(0.0, 1.0),
-                  "отсечение маловероятных продолжений",
-                  "top_p=0.9"),
+                  "доля самых вероятных продолжений, из которых идёт выбор",
+                  ["top_p=0.1 — почти без разброса", "top_p=1 — без отсечения"]),
         ParamSpec("stop", _stop_list,
-                  "строки, на которых генерация обрывается; несколько через |",
-                  "stop=###КОНЕЦ###"),
+                  "строки, на которых генерация обрывается",
+                  ["stop=###КОНЕЦ###", "stop=Вопрос:|Ответ:",
+                   "stop=\\n\\n — оборвать на пустой строке", "stop=none — снять"]),
         ParamSpec("response_format", _response_format,
-                  "режим структурированного вывода провайдера",
-                  "response_format=json_object"),
+                  "режим вывода на стороне провайдера",
+                  ["response_format=json_object — только валидный JSON",
+                   "response_format=text — обычный текст",
+                   "response_format=none — не передавать параметр"]),
     )
 }
 
@@ -147,7 +157,10 @@ def parse_command(argument: str) -> Tuple[Optional[GenerationParams], List[str],
     список сообщений об ошибках и признак запроса на сброс.
     """
     try:
-        tokens = shlex.split(argument)
+        # Удваиваем обратные слэши до разбора: иначе shlex съест их сам,
+        # и запись stop=\n превратится в букву n вместо переноса строки.
+        # Кавычки при этом продолжают работать как обычно.
+        tokens = shlex.split(argument.replace("\\", "\\\\"))
     except ValueError:
         return None, ["не удалось разобрать строку: проверьте кавычки"], False
 
