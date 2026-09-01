@@ -290,7 +290,7 @@ def build_stats(session: Session, width: int) -> RenderableType:
     )
     right_top_full = right_top_short.copy()
     right_top_full.append(
-        "  ·  резерв под ответ {}".format(fmt(session.model.output_reserve)), style="dim"
+        "  ·  резерв под ответ {}".format(fmt(session.output_reserve)), style="dim"
     )
 
     left_bottom = Text()
@@ -326,6 +326,14 @@ def build_stats(session: Session, width: int) -> RenderableType:
     elif left_need + 2 + max(right_top_short.cell_len, right_need) <= inner:
         right_top = right_top_short
 
+    changed = session.params.changed_fields()
+    params_line = None
+    if changed:
+        params_line = Text()
+        params_line.append("Параметры: ", style="bold")
+        params_line.append(" · ".join("{}={}".format(name, value) for name, value in changed),
+                           style="yellow")
+
     if right_top is not None:
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
@@ -333,11 +341,14 @@ def build_stats(session: Session, width: int) -> RenderableType:
         grid.add_column(justify="right")
         grid.add_row(left_top, "", right_top)
         grid.add_row(left_bottom, "", right_bottom)
-        body = grid
+        body = Group(grid, params_line) if params_line else grid
         subtitle = "[dim]/help — команды · /new — новый диалог · /exit — выход[/]"
     else:
         # Узкий терминал: колонки рядом не помещаются — выкладываем строками.
-        body = Group(left_top, right_top_short, left_bottom, right_bottom)
+        parts = [left_top, right_top_short, left_bottom, right_bottom]
+        if params_line:
+            parts.append(params_line)
+        body = Group(*parts)
         subtitle = "[dim]/help · /new · /exit[/]"
 
     return Panel(
@@ -452,10 +463,13 @@ def warning_panel(text: str) -> RenderableType:
 
 
 HELP_TEXT = (
-    "[bold]/help[/]     — эта справка\n"
-    "[bold]/history[/]  — показать всю переписку целиком\n"
-    "[bold]/stats[/]    — подробная статистика по токенам\n"
-    "[bold]/new[/]      — начать диалог заново (история очищается)\n"
-    "[bold]/exit[/]     — выход (также Ctrl+D)\n\n"
+    "[bold]/help[/]                — эта справка\n"
+    "[bold]/history[/]             — показать всю переписку целиком\n"
+    "[bold]/stats[/]               — подробная статистика по токенам\n"
+    "[bold]/change_llm_params[/]   — показать или изменить параметры генерации\n"
+    "[bold]/reset_llm_params[/]    — вернуть параметры к значениям по умолчанию\n"
+    "[bold]/new[/]                 — начать диалог заново (история очищается)\n"
+    "[bold]/exit[/]                — выход (также Ctrl+D)\n\n"
+    "[dim]Пример: /change_llm_params max_tokens=200 temperature=0.3[/]\n"
     "[dim]Любой другой текст отправляется в модель вместе со всей историей диалога.[/]"
 )

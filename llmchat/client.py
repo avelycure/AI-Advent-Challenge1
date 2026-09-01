@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import httpx
@@ -30,6 +30,12 @@ class Completion:
     text: str
     prompt_tokens: int
     completion_tokens: int
+    # Почему генерация закончилась: "stop" — модель договорила сама,
+    # "length" — упёрлась в max_tokens и ответ обрезан на полуслове.
+    finish_reason: str = "stop"
+    # Параметры, которые провайдер не принял и которые пришлось убрать.
+    # Без этого списка отключение параметра выглядело бы как его применение.
+    dropped_params: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -99,6 +105,23 @@ def describe_error(exc: Exception) -> str:
     return "{}: {}".format(name, _compact(text) or "неизвестная ошибка")
 
 
+def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> List[str]:
+    """Убрать из запроса параметры, которые провайдер не принимает.
+
+    Возвращает список убранных имён, чтобы можно было честно сказать
+    пользователю, что параметр не применился, а не молчать об этом.
+    """
+    text = error_chain_text(exc).lower()
+    if not any(marker in text for marker in ("400", "unsupported", "unknown", "invalid")):
+        return []
+    removed: List[str] = []
+    for name in ("response_format", "stop", "top_p"):
+        if name in kwargs and name.replace("_", "") in text.replace("_", ""):
+            kwargs.pop(name)
+            removed.append(name)
+    return removed
+
+
 def _endpoint_unsupported(exc: Exception) -> bool:
     """Отличить «у провайдера нет списка моделей» от настоящей проблемы.
 
@@ -150,6 +173,9 @@ class LLMClient:
         messages: List[Dict[str, str]],
         max_tokens: int,
         temperature: float = 0.7,
+        top_p: Optional[float] = None,
+        stop: Optional[List[str]] = None,
+        response_format: Optional[Dict[str, str]] = None,
     ) -> Completion:
         self._prepare()
         kwargs = {
@@ -158,6 +184,14 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if stop:
+            kwargs["stop"] = stop
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        dropped: List[str] = []
         try:
             response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -170,14 +204,22 @@ class LLMClient:
                 except Exception as retry_exc:  # noqa: BLE001
                     raise LLMError(describe_error(retry_exc)) from retry_exc
             else:
-                raise LLMError(describe_error(exc)) from exc
+                dropped = _drop_unsupported(exc, kwargs)
+                if not dropped:
+                    raise LLMError(describe_error(exc)) from exc
+                try:
+                    response = self._client.chat.completions.create(**kwargs)
+                except Exception as retry_exc:  # noqa: BLE001
+                    raise LLMError(describe_error(retry_exc)) from retry_exc
 
         if not response.choices:
             raise LLMError("Модель вернула пустой ответ без вариантов.")
 
-        text = (response.choices[0].message.content or "").strip()
+        choice = response.choices[0]
+        text = (choice.message.content or "").strip()
         if not text:
             raise LLMError("Модель вернула пустой текст ответа.")
+        finish_reason = getattr(choice, "finish_reason", "stop") or "stop"
 
         usage = getattr(response, "usage", None)
         if usage is not None:
@@ -194,7 +236,7 @@ class LLMClient:
             # Некоторые прокси не возвращают usage — оцениваем сами.
             prompt_tokens = count_message_tokens(messages)
             completion_tokens = count_text_tokens(text)
-        return Completion(text, prompt_tokens, completion_tokens)
+        return Completion(text, prompt_tokens, completion_tokens, finish_reason, dropped)
 
 
 class GigaChatAuth:
@@ -315,6 +357,9 @@ class DemoClient:
         messages: List[Dict[str, str]],
         max_tokens: int,
         temperature: float = 0.7,
+        top_p: Optional[float] = None,
+        stop: Optional[List[str]] = None,
+        response_format: Optional[Dict[str, str]] = None,
     ) -> Completion:
         time.sleep(random.uniform(1.2, 2.2))
         last_user = next(

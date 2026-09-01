@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from .params import GenerationParams
 from .providers import ModelInfo, ProviderInfo
 from .tokens import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
 
@@ -30,6 +31,8 @@ class Session:
     # gpt://<каталог>/<модель>/latest, поэтому на экране показываем model.id.
     model_ref: str = ""
     system_prompt: str = SYSTEM_PROMPT
+    # Параметры генерации, переключаемые командой прямо во время диалога.
+    params: GenerationParams = field(default_factory=GenerationParams)
     messages: List[Message] = field(default_factory=list)
     topic: str = DEFAULT_TOPIC
 
@@ -102,9 +105,18 @@ class Session:
         return self.model.context_window
 
     @property
+    def output_reserve(self) -> int:
+        """Сколько токенов оставлено под ответ с учётом заданных параметров."""
+        return self.params.effective_max_tokens(self.model.output_reserve)
+
+    @property
     def input_budget(self) -> int:
-        """Сколько контекста реально доступно под историю с учётом места на ответ."""
-        return max(1, self.model.context_window - self.model.output_reserve)
+        """Сколько контекста реально доступно под историю с учётом места на ответ.
+
+        Уменьшённый max_tokens освобождает место под историю — поэтому бюджет
+        считается по действующему значению, а не по резерву модели.
+        """
+        return max(1, self.model.context_window - self.output_reserve)
 
     def free_tokens(self) -> int:
         return max(0, self.input_budget - self.context_used())

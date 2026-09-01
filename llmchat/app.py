@@ -5,13 +5,14 @@ import argparse
 import importlib
 from typing import List, Optional
 
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich import box
 
 from .client import LLMError, make_client
+from .params import SPECS, GenerationParams, apply, format_value, parse_command
 from .session import Session
 from .tokens import tokenizer_name
 from .ui import (
@@ -166,7 +167,10 @@ def stats_panel(session: Session) -> RenderableType:
     if session.model_ref != session.model.id:
         table.add_row("Идентификатор для API", session.model_ref)
     table.add_row("Окно контекста", "{} токенов".format(fmt(session.context_limit)))
-    table.add_row("Резерв под ответ", "{} токенов".format(fmt(session.model.output_reserve)))
+    reserve = "{} токенов".format(fmt(session.output_reserve))
+    if session.params.max_tokens is not None:
+        reserve += " (задан max_tokens)"
+    table.add_row("Резерв под ответ", reserve)
     table.add_row("Доступно под историю", "{} токенов".format(fmt(session.input_budget)))
     table.add_row("Занято историей", "{} токенов ({:.0f}% окна)".format(
         fmt(session.context_used()), session.window_ratio() * 100))
@@ -182,6 +186,40 @@ def stats_panel(session: Session) -> RenderableType:
     table.add_row("Оценка неотправленного", tokenizer_name())
     return Panel(table, title="📊 Статистика сессии", title_align="left",
                  border_style="magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def params_panel(session: Session) -> RenderableType:
+    """Показать действующие параметры генерации и подсказку по команде."""
+    table = Table(box=box.SIMPLE_HEAVY, expand=True, pad_edge=False)
+    table.add_column("Параметр", style="bold")
+    table.add_column("Значение", justify="right")
+    table.add_column("Что делает", style="dim")
+
+    values = {
+        "max_tokens": ("{} (резерв модели)".format(session.output_reserve)
+                       if session.params.max_tokens is None
+                       else str(session.params.max_tokens)),
+        "temperature": format_value(session.params.temperature),
+        "top_p": format_value(session.params.top_p),
+        "stop": format_value(session.params.stop),
+        "response_format": format_value(session.params.response_format),
+    }
+    default = GenerationParams()
+    for name, spec in SPECS.items():
+        changed = getattr(session.params, name) != getattr(default, name)
+        table.add_row(
+            name,
+            "[bold yellow]{}[/]".format(values[name]) if changed else "[dim]{}[/]".format(values[name]),
+            spec.description,
+        )
+
+    hint = Text.from_markup(
+        "\n[dim]Изменить:[/] [bold]/change_llm_params max_tokens=200 temperature=0.3[/]\n"
+        "[dim]Сбросить:[/] [bold]/reset_llm_params[/]   "
+        "[dim]Несколько стоп-строк — через |[/]")
+    return Panel(Group(table, hint), title="⚙ Параметры генерации", title_align="left",
+                 subtitle="[dim]жёлтым — изменённые[/]", subtitle_align="right",
+                 border_style="cyan", box=box.ROUNDED, padding=(0, 1))
 
 
 def farewell(console: Console, session: Session) -> None:
@@ -201,6 +239,31 @@ def farewell(console: Console, session: Session) -> None:
 # Основной цикл
 # --------------------------------------------------------------------------
 
+def handle_params_command(session: Session, argument: str) -> RenderableType:
+    """Применить /change_llm_params и вернуть панель с результатом."""
+    updates, errors, reset = parse_command(argument)
+
+    if reset:
+        session.params = GenerationParams()
+        return info_panel("Параметры генерации вернулись к значениям по умолчанию.",
+                          title="Сброшено", style="green")
+
+    if not argument.strip():
+        return params_panel(session)
+
+    if errors and not updates:
+        return error_panel("\n".join(errors))
+
+    session.params = apply(session.params, updates)
+    lines = ["Применено: " + ", ".join(
+        "[bold]{}[/]=[yellow]{}[/]".format(name, format_value(value))
+        for name, value in updates.items())]
+    if errors:
+        lines.append("[red]Не принято: {}[/]".format("; ".join(errors)))
+    lines.append("[dim]Действует для всех следующих запросов.[/]")
+    return info_panel("\n".join(lines), title="Параметры генерации", style="cyan")
+
+
 def chat_loop(console: Console, client, session: Session) -> None:
     notice: Optional[RenderableType] = None
 
@@ -218,7 +281,8 @@ def chat_loop(console: Console, client, session: Session) -> None:
             continue
 
         if raw.startswith("/"):
-            command = raw.split()[0].lower()
+            command, _, argument = raw.partition(" ")
+            command = command.lower()
             if command in ("/exit", "/quit", "/q"):
                 break
             if command == "/help":
@@ -229,6 +293,14 @@ def chat_loop(console: Console, client, session: Session) -> None:
                 continue
             if command == "/history":
                 render_history(console, session)
+                continue
+            if command == "/change_llm_params":
+                notice = handle_params_command(session, argument)
+                continue
+            if command == "/reset_llm_params":
+                session.params = GenerationParams()
+                notice = info_panel("Параметры генерации вернулись к значениям "
+                                    "по умолчанию.", title="Сброшено", style="green")
                 continue
             if command == "/new":
                 session.reset()
@@ -253,7 +325,11 @@ def chat_loop(console: Console, client, session: Session) -> None:
                 completion = client.complete(
                     session.model_ref,
                     session.api_messages(),
-                    max_tokens=session.model.output_reserve,
+                    max_tokens=session.output_reserve,
+                    temperature=session.params.temperature,
+                    top_p=session.params.top_p,
+                    stop=session.params.stop,
+                    response_format=session.params.response_format_arg,
                 )
         except LLMError as exc:
             session.drop_last_user()
@@ -267,6 +343,18 @@ def chat_loop(console: Console, client, session: Session) -> None:
 
         session.add_assistant(completion.text)
         session.record_main_usage(completion.prompt_tokens, completion.completion_tokens)
+
+        if completion.finish_reason == "length":
+            notice = warning_panel(
+                "Ответ обрезан: упёрся в max_tokens = {}. Модель не договорила. "
+                "Увеличьте лимит командой /change_llm_params max_tokens=… "
+                "или сбросьте параметры.".format(fmt(session.output_reserve)))
+
+        if completion.dropped_params:
+            notice = warning_panel(
+                "Провайдер не принял: {}. Параметр убран из запроса, чтобы диалог "
+                "не прервался, но он не действует.".format(
+                    ", ".join(completion.dropped_params)))
 
         if should_update_topic(session):
             with console.status("[dim]Определяю тему диалога…[/]", spinner="dots"):
