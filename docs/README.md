@@ -14,6 +14,7 @@
 | [feature-llm-params.md](feature-llm-params.md) | переключение параметров генерации во время диалога |
 | [feature-grok.md](feature-grok.md) | пятый провайдер: Grok от xAI |
 | [feature-free-providers.md](feature-free-providers.md) | OpenRouter и Google Gemini — модели без оплаты |
+| [feature-reasoning.md](feature-reasoning.md) | четыре способа поставить одну задачу и сравнение результатов |
 
 Все эти работы собраны в одной ветке `feature/llm-params`: сначала они велись
 по отдельным веткам, но это раздробило связанные правки одних и тех же файлов
