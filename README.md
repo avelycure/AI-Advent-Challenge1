@@ -105,6 +105,7 @@ python3 -m venv .venv
 | ChatGPT (OpenAI) | `OPENAI_API_KEY` | `~/.openai-key` |
 | YandexGPT | `YANDEX_API_KEY` | `~/.yandex-key` и `~/.yandex-folder` |
 | GigaChat | `GIGACHAT_CREDENTIALS` | `~/.gigachat-key` |
+| Grok (xAI) | `XAI_API_KEY` | `~/.grok-key` |
 
 Дополнительно просматривается каталог `~/.config/llm-chat/` — например,
 `~/.config/llm-chat/gigachat.key`.
@@ -123,6 +124,27 @@ echo 'ваш-ключ' > ~/.gigachat-key && chmod 600 ~/.gigachat-key
 
 Ключи программа только читает и никогда не записывает. Чтобы принудительно
 спросить реквизиты заново, запустите с флагом `--ask-keys`.
+
+### Grok (xAI)
+
+Ключ берётся в консоли `console.x.ai`, раздел API Keys, и начинается с `xai-`.
+Протокол OpenAI-совместимый, адрес `https://api.x.ai/v1`.
+
+**Бесплатного тарифа у xAI нет.** Без купленных кредитов API отвечает отказом
+на любой запрос, включая список моделей:
+
+```
+403 permission-denied: Your newly created team doesn't have any credits
+    or licenses yet.
+```
+
+Программа переводит это в понятное сообщение и предлагает выбрать другого
+провайдера. Отдельно стоит знать, что на неверный ключ xAI отвечает кодом 400,
+а не 401, как остальные, — этот случай тоже разобран отдельно.
+
+Набор моделей зависит от аккаунта: у ключа есть свой список прав. Посмотреть
+его можно в консоли или запросом к `https://api.x.ai/v1/api-key` — он работает
+даже без кредитов и заодно проверяет, что ключ действителен.
 
 ### DeepSeek и ChatGPT
 

@@ -85,6 +85,12 @@ def describe_error(exc: Exception) -> str:
         return ("Вместо ответа API пришла HTML-страница — запрос перехватил прокси "
                 "или фильтр сети. Добавьте адрес провайдера в NO_PROXY либо "
                 "отключите прокси для него.")
+    if "incorrect api key" in lowered:
+        # xAI отвечает на неверный ключ кодом 400, а не 401, как остальные.
+        return "Ключ отклонён провайдером. Проверьте его в консоли console.x.ai."
+    if "credits or licenses" in lowered or "no credits" in lowered:
+        return ("У аккаунта нет кредитов: xAI не даёт бесплатного доступа к моделям. "
+                "Пополните баланс в консоли console.x.ai или выберите другого провайдера.")
     if name == "AuthenticationError" or "401" in text or "invalid_api_key" in text:
         return "Ключ отклонён провайдером (401). Проверьте, что он актуален и скопирован целиком."
     if name == "PermissionDeniedError" or "403" in text:

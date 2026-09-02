@@ -141,6 +141,27 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         notes=["Ключ и каталог берутся в консоли Yandex Cloud: нужен сервисный аккаунт "
                "с ролью ai.languageModels.user."],
     ),
+    "grok": ProviderInfo(
+        key="grok",
+        name="Grok (xAI)",
+        base_url="https://api.x.ai/v1",
+        api_key_env="XAI_API_KEY",
+        token_url="https://console.x.ai",
+        accent="bright_cyan",
+        key_hint="ключ начинается с xai-",
+        key_files=["~/.grok-key", "~/.config/llm-chat/grok.key"],
+        # Названия взяты из прав самого ключа (эндпоинт /v1/api-key), а не из
+        # документации: у разных аккаунтов набор моделей отличается.
+        models=[
+            ModelInfo("grok-4.3", "Grok 4.3 — самая дешёвая из доступных", 131_072, 8_192),
+            ModelInfo("grok-4.5", "Grok 4.5 — сбалансированная", 131_072, 8_192),
+            ModelInfo("grok-4.6", "Grok 4.6 — самая свежая", 131_072, 8_192),
+        ],
+        notes=["Бесплатного тарифа у xAI нет: без купленных кредитов API отвечает "
+               "отказом на любой запрос, включая список моделей.",
+               "Набор моделей зависит от аккаунта. Свой список видно в консоли "
+               "console.x.ai или запросом к https://api.x.ai/v1/api-key."],
+    ),
     "gigachat": ProviderInfo(
         key="gigachat",
         name="GigaChat (Сбер)",
@@ -170,4 +191,4 @@ PROVIDERS: Dict[str, ProviderInfo] = {
     ),
 }
 
-PROVIDER_ORDER: List[str] = ["deepseek", "openai", "yandex", "gigachat"]
+PROVIDER_ORDER: List[str] = ["deepseek", "openai", "yandex", "gigachat", "grok"]
