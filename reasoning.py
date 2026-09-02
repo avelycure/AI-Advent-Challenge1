@@ -86,8 +86,22 @@ class Attempt:
 # Прогон
 # --------------------------------------------------------------------------
 
+def sent_panel(messages: List[dict], accent: str, title: str) -> RenderableType:
+    """Показать, что именно уходит в модель на этом шаге."""
+    body = Text()
+    for message in messages:
+        role = {"system": "системное сообщение", "user": "вопрос"}.get(
+            message["role"], message["role"])
+        body.append("[{}]\n".format(role), style="dim")
+        content = message["content"]
+        body.append(content if len(content) <= 900 else content[:900] + "…\n")
+        body.append("\n")
+    return Panel(body, title=title, title_align="left",
+                 border_style=accent, box=box.ROUNDED, padding=(0, 1))
+
+
 def run_strategy(console: Console, client, model_ref: str, task: Task,
-                 strategy: Strategy) -> Attempt:
+                 strategy: Strategy, show: bool = True) -> Attempt:
     calls = 0
     tokens = 0
     artifact = None
@@ -96,15 +110,28 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
     def ask(prompt: str) -> str:
         """Вспомогательный запрос — нужен способу с промптом от самой модели."""
         nonlocal calls, tokens, artifact
-        completion = client.complete(model_ref, [{"role": "user", "content": prompt}],
-                                     max_tokens=600, temperature=TEMPERATURE)
+        if show:
+            console.print(sent_panel([{"role": "user", "content": prompt}],
+                                     strategy.accent,
+                                     "Сначала просим модель написать промпт"))
+        with console.status("[bold]модель пишет промпт…[/]", spinner="dots"):
+            completion = client.complete(model_ref, [{"role": "user", "content": prompt}],
+                                         max_tokens=600, temperature=TEMPERATURE)
         calls += 1
         tokens += completion.prompt_tokens + completion.completion_tokens
         artifact = completion.text
+        if show:
+            console.print(Panel(Text(completion.text.strip()[:900]),
+                                title="Промпт, который модель написала себе сама",
+                                title_align="left", border_style="magenta",
+                                box=box.ROUNDED, padding=(0, 1)))
         return completion.text
 
-    with console.status("[bold]{}…[/]".format(strategy.title), spinner="dots"):
-        messages = strategy.build(task, ask)
+    messages = strategy.build(task, ask)
+    if show:
+        console.print(sent_panel(messages, strategy.accent, "Отправляем в модель"))
+    with console.status("[bold]{} — модель отвечает…[/]".format(strategy.title),
+                        spinner="dots"):
         completion = client.complete(model_ref, messages,
                                      max_tokens=ANSWER_MAX_TOKENS, temperature=TEMPERATURE)
     calls += 1
@@ -404,17 +431,38 @@ def verdict_many(summaries: List[Summary]) -> RenderableType:
                  border_style="green", box=box.ROUNDED)
 
 
-def artifact_panel(attempts: List[Attempt]) -> Optional[RenderableType]:
-    for attempt in attempts:
-        if attempt.artifact:
-            return Panel(Text(attempt.artifact.strip()[:900]),
-                         title="Промпт, который модель написала себе сама",
-                         title_align="left", border_style="magenta",
-                         box=box.ROUNDED, padding=(0, 1))
-    return None
+def step_header(number: int, total: int, strategy: Strategy) -> RenderableType:
+    body = Text()
+    body.append("Шаг {} из {}: ".format(number, total), style="dim")
+    body.append(strategy.title, style="bold {}".format(strategy.accent))
+    body.append("\n{}".format(strategy.description), style="dim")
+    return Panel(body, box=box.ROUNDED, border_style=strategy.accent, padding=(0, 1))
 
 
-# --------------------------------------------------------------------------
+def result_line(attempt: Attempt) -> RenderableType:
+    text = Text()
+    text.append("Итог этого способа: ", style="bold")
+    text.append(str(attempt.answer) if attempt.answer is not None else "не назван",
+                style="bold green" if attempt.correct else "bold red")
+    text.append(" — {}".format("верно" if attempt.correct else "неверно"),
+                style="green" if attempt.correct else "red")
+    quality = attempt.quality
+    if quality is not None:
+        text.append("   ·   оценка объяснения: ", style="bold")
+        text.append("{:.1f} из 5".format(quality), style="magenta")
+        text.append("  ({})".format(", ".join(
+            "{} {}".format(name, attempt.scores[name])
+            for name, _ in JUDGE_CRITERIA if name in attempt.scores)), style="dim")
+    if attempt.truncated:
+        text.append("\nОтвет упёрся в лимит длины — итог мог не успеть прозвучать.",
+                    style="yellow")
+    return Panel(text, box=box.ROUNDED, border_style="grey42", padding=(0, 1))
+
+
+CLEAR_NOTE = ("🧹 История очищена: следующий способ спрашивает с чистого листа. "
+              "Каждый запрос независим — модель не видит прошлых ответов.")
+
+
 def step(console: Console, enabled: bool, prompt: str) -> bool:
     """Пауза до нажатия Enter. Возвращает False, если пользователь прервал показ."""
     if not enabled:
@@ -458,39 +506,46 @@ def main(argv=None) -> int:
     task = DIGIT_TASK
     console.clear()
     console.print(task_panel(task, judge_name))
+    if not step(console, args.step, "Enter — начать первый способ"):
+        return 0
 
     attempts: List[Attempt] = []
+    total = len(STRATEGIES)
     try:
-        for _ in range(max(1, args.runs)):
-            for strategy in STRATEGIES:
-                attempt = run_strategy(console, client, model_ref, task, strategy)
+        for run in range(1, max(1, args.runs) + 1):
+            # Подробно показываем первый прогон: повторы нужны ради свода,
+            # и показывать их так же подробно значило бы утомить зрителя.
+            live = run == 1
+            if not live:
+                console.print("\n[dim]Прогон {} из {} — повтор для свода…[/]".format(
+                    run, args.runs))
+            for number, strategy in enumerate(STRATEGIES, start=1):
+                if live:
+                    console.clear()
+                    console.print(task_panel(task, judge_name))
+                    console.print(step_header(number, total, strategy))
+                attempt = run_strategy(console, client, model_ref, task, strategy, show=live)
+                # Итог достаём до отрисовки: иначе на панели останется число,
+                # найденное регуляркой, и оно разойдётся со строкой итога.
                 extract_final(console, judge_client, judge_ref, attempt)
+                if live:
+                    console.print(attempt_panel(attempt))
                 judge(console, judge_client, judge_ref, task, attempt)
                 attempts.append(attempt)
+                if live:
+                    console.print(result_line(attempt))
+                    if number < total:
+                        console.print(Text(CLEAR_NOTE, style="dim cyan"))
+                    if not step(console, args.step,
+                                "Enter — следующий способ" if number < total
+                                else "Enter — сравнение"):
+                        return 0
     except LLMError as exc:
         console.print(Panel(Text(str(exc), style="red"), title="⚠ Ошибка",
                             border_style="red", box=box.ROUNDED))
         return 1
 
     console.clear()
-    console.print(task_panel(task, judge_name))
-    extra = artifact_panel(attempts)
-    if extra is not None:
-        console.print(extra)
-    if not step(console, args.step, "Enter — показать ответы по очереди"):
-        return 0
-
-    shown = attempts if args.runs == 1 else attempts[:len(STRATEGIES)]
-    for index, attempt in enumerate(shown, start=1):
-        if args.step:
-            console.clear()
-        console.print(attempt_panel(attempt))
-        last = index == len(shown)
-        hint = "Enter — сравнение" if last else "Enter — следующий способ"
-        if not step(console, args.step, hint):
-            return 0
-    if args.step:
-        console.clear()
 
     # При нескольких прогонах построчная таблица разрастается и мешает:
     # показываем свод, ради которого повторы и делались.

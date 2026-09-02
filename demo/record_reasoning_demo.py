@@ -58,28 +58,29 @@ def build_scenario(rec: TerminalRecorder, key: str, provider: str, model: str) -
     rec.say("Задача с заранее известным ответом — иначе «точнее» не проверить")
     rec.wait_for("Условия опыта", 30)
     rec.wait_idle(0.8)
-    rec.hold(7.0)
+    rec.hold(8.0)
+    rec.enter()          # программа ждёт, поэтому подписи не разъезжаются
 
-    rec.say("Четыре способа спросить одно и то же — модель решает")
-    rec.wait_for("Enter — показать ответы", SOLVE_TIMEOUT)
-    rec.wait_idle(1.0, 60)
-    rec.hold(5.5)          # промпт, который модель написала себе сама
-    rec.enter()
-
-    captions = [
-        "Способ 1 — прямой вопрос, без единой добавки",
-        "Способ 2 — просьба решать пошагово",
-        "Способ 3 — решение по промпту, который модель написала себе",
-        "Способ 4 — аналитик, инженер и критик",
+    # Четыре шага идут по очереди: видно, что отправили, что ответили,
+    # засчитали ли итог и что перед следующим способом история чистая.
+    steps = [
+        ("Способ 1 — задаём вопрос как есть, без единой добавки", 7.5),
+        ("Способ 2 — тот же вопрос плюс просьба решать пошагово", 7.5),
+        ("Способ 3 — модель сначала пишет промпт себе, потом решает по нему", 9.0),
+        ("Способ 4 — аналитик, инженер и критик отвечают по очереди", 8.5),
     ]
-    for caption in captions:
+    for index, (caption, hold) in enumerate(steps, start=1):
         rec.say(caption)
-        rec.wait_idle(0.8, 60)
-        rec.hold(7.0)
+        rec.wait_for("Итог этого способа", SOLVE_TIMEOUT)
+        rec.wait_idle(1.0, 90)
+        rec.hold(hold)
+        if index < len(steps):
+            rec.say("История очищена — следующий способ спрашивает с чистого листа")
+            rec.hold(3.0)
         rec.enter()
 
-    rec.say("Свод: верность итога считает код, качество оценивает другая модель")
-    rec.wait_idle(1.0, 120)
+    rec.say("Сравнение: верность считает код, качество оценивает другая модель")
+    rec.wait_idle(1.2, 180)
     rec.hold(11.0)
     rec.enter()
     rec.pause(0.6)
@@ -91,7 +92,7 @@ def main() -> int:
     parser.add_argument("--provider", default="6")
     parser.add_argument("--model", default="1")
     parser.add_argument("--judge", default="gigachat")
-    parser.add_argument("--runs", default="2")
+    parser.add_argument("--runs", default="1")
     parser.add_argument("--label", default="MiniMax M3, оценивает GigaChat")
     parser.add_argument("--output", default="~/Desktop/llm-reasoning-demo.mp4")
     args = parser.parse_args()
