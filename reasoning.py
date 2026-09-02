@@ -38,6 +38,7 @@ from llmchat.providers import PROVIDERS
 from llmchat.secrets import find_sources
 from llmchat.strategies import (
     DIGIT_TASK,
+    EXPERT_TASK_SUFFIX,
     EXTRACT_PROMPT,
     JUDGE_CRITERIA,
     JUDGE_PROMPT,
@@ -50,9 +51,13 @@ from llmchat.strategies import (
 )
 from llmchat.ui import fmt, make_console, plural
 
-ANSWER_MAX_TOKENS = 2600
+# Задача требует перебора вариантов: при 2600 половина ответов
+# не успевала дойти до итога, и сравнение получалось нечестным.
+ANSWER_MAX_TOKENS = 4200
 JUDGE_MAX_TOKENS = 120
-TEMPERATURE = 0.3
+# Повышенная температура намеренно: при 0.2–0.3 модель отвечает почти
+# одинаково, и разница между способами постановки промпта не видна.
+TEMPERATURE = 0.9
 
 
 @dataclass
@@ -70,10 +75,16 @@ class Attempt:
     truncated: bool = False
     judge_note: str = ""
     extracted_by: str = "разбором текста"
+    # Для способа с несколькими независимыми участниками: ответ каждого.
+    parts: List[tuple] = field(default_factory=list)
 
     @property
     def correct(self) -> bool:
         return self.answer is not None and self.answer == DIGIT_TASK.answer
+
+    @property
+    def is_multi(self) -> bool:
+        return bool(self.parts)
 
     @property
     def quality(self) -> Optional[float]:
@@ -101,7 +112,8 @@ def sent_panel(messages: List[dict], accent: str, title: str) -> RenderableType:
 
 
 def run_strategy(console: Console, client, model_ref: str, task: Task,
-                 strategy: Strategy, show: bool = True) -> Attempt:
+                 strategy: Strategy, show: bool = True, pause=None,
+                 temperature: float = TEMPERATURE) -> Attempt:
     calls = 0
     tokens = 0
     artifact = None
@@ -116,7 +128,7 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
                                      "Сначала просим модель написать промпт"))
         with console.status("[bold]модель пишет промпт…[/]", spinner="dots"):
             completion = client.complete(model_ref, [{"role": "user", "content": prompt}],
-                                         max_tokens=600, temperature=TEMPERATURE)
+                                         max_tokens=600, temperature=temperature)
         calls += 1
         tokens += completion.prompt_tokens + completion.completion_tokens
         artifact = completion.text
@@ -125,7 +137,14 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
                                 title="Промпт, который модель написала себе сама",
                                 title_align="left", border_style="magenta",
                                 box=box.ROUNDED, padding=(0, 1)))
+            # Промпт стоит прочитать: дальше экран займёт решение по нему.
+            if pause:
+                pause("Enter — решать по этому промпту")
         return completion.text
+
+    if strategy.experts:
+        return run_experts(console, client, model_ref, task, strategy, show, started,
+                           pause, temperature)
 
     messages = strategy.build(task, ask)
     if show:
@@ -133,13 +152,66 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
     with console.status("[bold]{} — модель отвечает…[/]".format(strategy.title),
                         spinner="dots"):
         completion = client.complete(model_ref, messages,
-                                     max_tokens=ANSWER_MAX_TOKENS, temperature=TEMPERATURE)
+                                     max_tokens=ANSWER_MAX_TOKENS, temperature=temperature)
     calls += 1
     tokens += completion.prompt_tokens + completion.completion_tokens
 
     return Attempt(strategy, completion.text, extract_answer(completion.text),
                    tokens, time.time() - started, calls, artifact,
                    truncated=(completion.finish_reason == "length"))
+
+
+def run_experts(console: Console, client, model_ref: str, task: Task,
+                strategy: Strategy, show: bool, started: float, pause=None,
+                temperature: float = TEMPERATURE) -> Attempt:
+    """Каждый эксперт отвечает своим запросом и не видит чужих ответов."""
+    pieces: List[str] = []
+    parts: List[tuple] = []
+    tokens = 0
+    truncated = False
+
+    for name, persona in strategy.experts:
+        messages = [{"role": "system", "content": persona},
+                    {"role": "user", "content": task.question + EXPERT_TASK_SUFFIX}]
+        if show:
+            console.print(sent_panel(messages, strategy.accent,
+                                     "Отдельный запрос: {}".format(name)))
+        with console.status("[bold]{} отвечает…[/]".format(name), spinner="dots"):
+            completion = client.complete(model_ref, messages,
+                                         max_tokens=ANSWER_MAX_TOKENS,
+                                         temperature=temperature)
+        tokens += completion.prompt_tokens + completion.completion_tokens
+        truncated = truncated or completion.finish_reason == "length"
+        value = extract_answer(completion.text)
+        parts.append((name, value))
+        pieces.append("### {}\n{}".format(name, completion.text.strip()))
+        if show:
+            console.print(Panel(Markdown(completion.text.strip()[:1200]),
+                                title="[bold {}]{}[/]".format(strategy.accent, name),
+                                subtitle="[green]✓ {}[/]".format(value)
+                                if value == task.answer
+                                else "[red]✗ {}[/]".format(value if value is not None
+                                                           else "нет числа"),
+                                subtitle_align="right", border_style=strategy.accent,
+                                box=box.ROUNDED, padding=(0, 1)))
+            # Ответы длинные: без остановки предыдущий эксперт уедет за край.
+            if pause and (name, None) != (strategy.experts[-1][0], None):
+                pause("Enter — следующий эксперт")
+            elif pause:
+                pause("Enter — итог по трём экспертам")
+
+    # Итог группы — то, на чём сошлось большинство. Единого ответа у независимых
+    # экспертов нет, и выбирать чей-то один было бы произволом.
+    values = [value for _, value in parts if value is not None]
+    answer = None
+    if values:
+        answer = max(set(values), key=values.count)
+        if values.count(answer) < 2:
+            answer = None      # согласия нет
+    return Attempt(strategy, "\n\n".join(pieces), answer, tokens,
+                   time.time() - started, len(strategy.experts), None,
+                   truncated=truncated, parts=parts,
+                   extracted_by="большинством голосов")
 
 
 def extract_final(console: Console, client, model_ref: str, attempt: Attempt) -> None:
@@ -226,7 +298,7 @@ def banner(console: Console) -> None:
     console.print()
 
 
-def task_panel(task: Task, judge_name: str) -> RenderableType:
+def task_panel(task: Task, judge_name: str, temperature: float) -> RenderableType:
     body = Text()
     body.append("Задача\n", style="bold")
     body.append("  {}\n\n".format(task.question))
@@ -234,12 +306,16 @@ def task_panel(task: Task, judge_name: str) -> RenderableType:
     body.append("{}".format(task.answer), style="bold green")
     body.append("  — посчитан кодом: ", style="dim")
     body.append(task.verify, style="dim cyan")
-    if task.trap:
-        body.append("\nРядом ловушка: ", style="bold")
-        body.append("{} ".format(task.trap), style="yellow")
-        body.append("— {}".format(task.trap_note), style="dim")
+    for value, note in task.traps:
+        body.append("\nЛовушка ", style="bold")
+        body.append("{}".format(value), style="yellow")
+        body.append(" — {}".format(note), style="dim")
     body.append("\n\nКачество объяснения оценивает: ", style="bold")
     body.append(judge_name, style="magenta")
+    body.append("\nТемпература ответов: ", style="bold")
+    body.append("{}".format(temperature), style="yellow")
+    body.append(" — намеренно высокая, чтобы точность промпта была заметнее",
+                style="dim")
     return Panel(body, title="Условия опыта", title_align="left",
                  border_style="bright_blue", box=box.ROUNDED, padding=(0, 1))
 
@@ -441,11 +517,22 @@ def step_header(number: int, total: int, strategy: Strategy) -> RenderableType:
 
 def result_line(attempt: Attempt) -> RenderableType:
     text = Text()
+    if attempt.parts:
+        text.append("Ответы экспертов: ", style="bold")
+        for index, (name, value) in enumerate(attempt.parts):
+            if index:
+                text.append("   ·   ", style="dim")
+            text.append("{} — ".format(name), style="dim")
+            text.append(str(value) if value is not None else "нет числа",
+                        style="green" if value == DIGIT_TASK.answer else "red")
+        text.append("\n")
     text.append("Итог этого способа: ", style="bold")
     text.append(str(attempt.answer) if attempt.answer is not None else "не назван",
                 style="bold green" if attempt.correct else "bold red")
     text.append(" — {}".format("верно" if attempt.correct else "неверно"),
                 style="green" if attempt.correct else "red")
+    if attempt.parts:
+        text.append("  (по большинству)", style="dim")
     quality = attempt.quality
     if quality is not None:
         text.append("   ·   оценка объяснения: ", style="bold")
@@ -480,6 +567,8 @@ def main(argv=None) -> int:
                         help="кто оценивает качество: ключ провайдера, например gigachat")
     parser.add_argument("--runs", type=int, default=1,
                         help="сколько раз повторить каждый способ")
+    parser.add_argument("--temperature", type=float, default=TEMPERATURE,
+                        help="случайность ответов: выше — сильнее влияние промпта")
     parser.add_argument("--ask-keys", action="store_true")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--step", action="store_true",
@@ -505,7 +594,7 @@ def main(argv=None) -> int:
 
     task = DIGIT_TASK
     console.clear()
-    console.print(task_panel(task, judge_name))
+    console.print(task_panel(task, judge_name, args.temperature))
     if not step(console, args.step, "Enter — начать первый способ"):
         return 0
 
@@ -522,13 +611,22 @@ def main(argv=None) -> int:
             for number, strategy in enumerate(STRATEGIES, start=1):
                 if live:
                     console.clear()
-                    console.print(task_panel(task, judge_name))
+                    console.print(task_panel(task, judge_name, args.temperature))
                     console.print(step_header(number, total, strategy))
-                attempt = run_strategy(console, client, model_ref, task, strategy, show=live)
+                stepping = args.step and live
+
+                def hold(prompt: str, _console=console) -> None:
+                    if stepping and not step(_console, True, prompt):
+                        raise KeyboardInterrupt
+
+                attempt = run_strategy(console, client, model_ref, task, strategy,
+                                       show=live, pause=hold if stepping else None,
+                                       temperature=args.temperature)
                 # Итог достаём до отрисовки: иначе на панели останется число,
                 # найденное регуляркой, и оно разойдётся со строкой итога.
-                extract_final(console, judge_client, judge_ref, attempt)
-                if live:
+                if not attempt.is_multi:
+                    extract_final(console, judge_client, judge_ref, attempt)
+                if live and not attempt.is_multi:
                     console.print(attempt_panel(attempt))
                 judge(console, judge_client, judge_ref, task, attempt)
                 attempts.append(attempt)
@@ -540,6 +638,9 @@ def main(argv=None) -> int:
                                 "Enter — следующий способ" if number < total
                                 else "Enter — сравнение"):
                         return 0
+    except KeyboardInterrupt:
+        console.print("\n[dim]Показ прерван.[/]")
+        return 0
     except LLMError as exc:
         console.print(Panel(Text(str(exc), style="red"), title="⚠ Ошибка",
                             border_style="red", box=box.ROUNDED))
