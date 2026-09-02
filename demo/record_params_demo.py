@@ -78,12 +78,13 @@ def fresh(rec: TerminalRecorder) -> None:
     rec.hold(0.5)
 
 
-def build_scenario(rec: TerminalRecorder, key: str, collected: list) -> None:
+def build_scenario(rec: TerminalRecorder, key: str, collected: list,
+                   provider: str = "4", model: str = "1") -> None:
     rec.say("Реквизиты подхватываются из локального файла")
     rec.wait_for("Выберите LLM", 40)
     rec.wait_idle(0.6)
     rec.hold(2.5)
-    rec.type_text("4", settle=1.0)
+    rec.type_text(provider, settle=1.0)
     rec.enter()
     rec.wait_for("Использовать|Вставьте", 20)
     rec.wait_idle(0.6)
@@ -96,7 +97,7 @@ def build_scenario(rec: TerminalRecorder, key: str, collected: list) -> None:
     rec.wait_for("Выберите модель", 60)
     rec.wait_idle(0.6)
     rec.hold(2.5)
-    rec.type_text("1", settle=1.0)
+    rec.type_text(model, settle=1.0)
     rec.enter()
     rec.wait_for("Диалог пуст", 15)
     rec.wait_idle(0.6)
@@ -124,8 +125,8 @@ def build_scenario(rec: TerminalRecorder, key: str, collected: list) -> None:
         collect=collected, label="temperature=0")
     rec.say("Очищаем историю")
     fresh(rec)
-    rec.narrate("Повторяю тот же вопрос — ответ должен совпасть", read=3.0, cps=19)
-    ask(rec, "Ответ почти дословно тот же — вот что даёт нулевая температура", hold=7.0,
+    rec.narrate("Повторяю тот же вопрос и смотрю, насколько совпадёт", read=3.0, cps=19)
+    ask(rec, "Сравните с прошлым ответом: при нуле разброс наименьший", hold=7.0,
         collect=collected, label="temperature=0, повтор")
 
     # --- опыт 3: разброс --------------------------------------------------
@@ -138,7 +139,7 @@ def build_scenario(rec: TerminalRecorder, key: str, collected: list) -> None:
     rec.say("Очищаем историю")
     fresh(rec)
     rec.narrate("И снова тот же вопрос — теперь ответ будет другим", read=3.0, cps=19)
-    ask(rec, "Ответ заметно отличается — вот что даёт высокая температура", hold=7.0,
+    ask(rec, "А здесь ответы расходятся заметно сильнее", hold=7.0,
         collect=collected, label="temperature=1.8, повтор")
 
     # --- опыт 4: формат параметром ---------------------------------------
@@ -167,6 +168,10 @@ def build_scenario(rec: TerminalRecorder, key: str, collected: list) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ролик про параметры генерации")
     parser.add_argument("--key-file", default="~/.gigachat-key")
+    parser.add_argument("--provider", default="4",
+                        help="номер провайдера в меню выбора")
+    parser.add_argument("--model", default="1", help="номер модели в меню выбора")
+    parser.add_argument("--label", default="", help="название провайдера для заставок")
     parser.add_argument("--fake", action="store_true")
     parser.add_argument("--output", default="~/Desktop/llm-params-demo.mp4")
     args = parser.parse_args()
@@ -184,20 +189,22 @@ def main() -> int:
 
     print("→ записываю сеанс…")
     collected: list = []
-    frames = record(argv, PROJECT, lambda rec: build_scenario(rec, key, collected),
+    frames = record(argv, PROJECT,
+                    lambda rec: build_scenario(rec, key, collected, args.provider, args.model),
                     COLS, ROWS, FPS)
     print("  снято ответов для сравнения: {}".format(len(collected)))
 
     renderer = FrameRenderer(COLS, ROWS, font_size=FONT_SIZE)
+    label = args.label or "выбранная модель"
     title = renderer.card("Параметры генерации", [
-        "один и тот же вопрос, разные настройки",
+        "один и тот же вопрос, разные настройки — {}".format(label),
         "",
         "длина  ·  предсказуемость  ·  разброс  ·  формат",
     ])
     outro = renderer.card("Что показано", [
         "max_tokens режет длину, обрыв программа объясняет прямо",
         "при temperature=0 ответы совпадают, при 1.8 — расходятся",
-        "response_format GigaChat принимает, но не применяет",
+        "response_format провайдер принимает, но не применяет",
         "формат надёжно задаётся словами в самом вопросе",
         "изменённые параметры видны в счётчиках, /reset_llm_params возвращает всё",
     ])
