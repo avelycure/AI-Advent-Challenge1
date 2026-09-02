@@ -20,16 +20,13 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
-import subprocess
 import sys
-import time
-from typing import List
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import imageio_ffmpeg
 from frame_renderer import FrameRenderer
-from terminal_recorder import Frame, TerminalRecorder, compress
+from pipeline import build_video, record
+from terminal_recorder import TerminalRecorder
 
 COLS, ROWS = 100, 28
 FPS = 10
@@ -102,25 +99,6 @@ def build_scenario(rec: TerminalRecorder, key: str, fake: bool) -> None:
     rec.hold(1.8)
 
 
-def encode(images, path: str, fps: int) -> None:
-    width, height = images[0].size
-    command = [
-        imageio_ffmpeg.get_ffmpeg_exe(), "-y",
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
-        "-s", "{}x{}".format(width, height), "-r", str(fps), "-i", "-",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-preset", "slow", "-crf", "26", "-tune", "stillimage",
-        "-movflags", "+faststart", path,
-    ]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    for image in images:
-        process.stdin.write(image.tobytes())
-    process.stdin.close()
-    if process.wait() != 0:
-        raise RuntimeError(process.stderr.read().decode("utf-8", "replace")[-2000:])
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Запись демонстрационного ролика")
     parser.add_argument("--key-file", default="~/.gigachat-key",
@@ -139,31 +117,12 @@ def main() -> int:
         key = key_path.read_text().strip()
 
     print("→ записываю сеанс…")
-    rec = TerminalRecorder(cols=COLS, rows=ROWS, fps=FPS)
     # --ask-keys: в ролике показываем ввод токена, а не подстановку из файла.
     argv = ["./run.sh", "--ask-keys"] + (["--demo"] if args.fake else [])
-    started = time.time()
-    rec.start(argv, cwd=PROJECT)
-    try:
-        build_scenario(rec, key, args.fake)
-    finally:
-        rec.stop()
-    print("  снято {} кадров за {:.0f} с".format(len(rec.frames), time.time() - started))
+    frames = record(argv, PROJECT, lambda rec: build_scenario(rec, key, args.fake),
+                    COLS, ROWS, FPS)
 
-    frames: List[Frame] = compress(rec.frames, FPS, MAX_SEGMENT)
-    print("  после сжатия пауз: {} кадров ({:.1f} с видео)".format(len(frames), len(frames) / FPS))
-
-    print("→ рисую кадры…")
     renderer = FrameRenderer(COLS, ROWS)
-    cache = {}
-    images = []
-    for frame in frames:
-        key_ = (frame.snapshot, frame.caption)
-        if key_ not in cache:
-            cache[key_] = renderer.render(frame.snapshot, frame.caption)
-        images.append(cache[key_])
-    print("  уникальных кадров: {}".format(len(cache)))
-
     title = renderer.card("Терминальный чат с LLM", [
         "DeepSeek  ·  ChatGPT  ·  YandexGPT  ·  GigaChat",
         "",
@@ -176,15 +135,9 @@ def main() -> int:
         "заполнение контекста, остаток и расход токенов",
         "память диалога: история пересылается в модель целиком",
     ])
-    images = ([title] * int(TITLE_SECONDS * FPS) + images
-              + [outro] * int(OUTRO_SECONDS * FPS))
-
-    output = os.path.expanduser(args.output)
-    print("→ кодирую…")
-    encode(images, output, FPS)
-    size = os.path.getsize(output)
-    print("\nГотово: {}".format(output))
-    print("  длительность {:.1f} с | размер {:.1f} МБ".format(len(images) / FPS, size / 1024 / 1024))
+    build_video(frames, renderer, args.output, FPS, MAX_SEGMENT,
+                title=title, outro=outro,
+                title_seconds=TITLE_SECONDS, outro_seconds=OUTRO_SECONDS)
     return 0
 
 
