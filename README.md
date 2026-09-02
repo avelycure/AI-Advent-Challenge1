@@ -466,6 +466,9 @@ python3 -m venv .venv-demo
 # параметры генерации: один вопрос, разные настройки
 .venv-demo/bin/python demo/record_params_demo.py --key-file ~/.gigachat-key
 
+# четыре способа поставить одну задачу
+.venv-demo/bin/python demo/record_reasoning_demo.py
+
 # управление ответом: свободный ответ против управляемого
 .venv-demo/bin/python demo/record_control_demo.py --key-file ~/.gigachat-key
 ```

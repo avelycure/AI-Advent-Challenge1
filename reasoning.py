@@ -217,7 +217,7 @@ def task_panel(task: Task, judge_name: str) -> RenderableType:
                  border_style="bright_blue", box=box.ROUNDED, padding=(0, 1))
 
 
-def attempt_panel(attempt: Attempt, max_lines: int = 14) -> RenderableType:
+def attempt_panel(attempt: Attempt, max_lines: int = 22) -> RenderableType:
     lines = attempt.text.strip().splitlines()
     shown = "\n".join(lines[:max_lines])
     if len(lines) > max_lines:
@@ -415,6 +415,17 @@ def artifact_panel(attempts: List[Attempt]) -> Optional[RenderableType]:
 
 
 # --------------------------------------------------------------------------
+def step(console: Console, enabled: bool, prompt: str) -> bool:
+    """Пауза до нажатия Enter. Возвращает False, если пользователь прервал показ."""
+    if not enabled:
+        return True
+    try:
+        console.input("\n[dim]{}[/] ".format(prompt))
+        return True
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Четыре способа решить одну задачу")
     parser.add_argument("--judge", default="", metavar="ПРОВАЙДЕР",
@@ -466,14 +477,19 @@ def main(argv=None) -> int:
     extra = artifact_panel(attempts)
     if extra is not None:
         console.print(extra)
-    if args.step:
-        console.input("\n[dim]Enter — показать ответы[/] ")
+    if not step(console, args.step, "Enter — показать ответы по очереди"):
+        return 0
 
     shown = attempts if args.runs == 1 else attempts[:len(STRATEGIES)]
-    for attempt in shown:
+    for index, attempt in enumerate(shown, start=1):
+        if args.step:
+            console.clear()
         console.print(attempt_panel(attempt))
+        last = index == len(shown)
+        hint = "Enter — сравнение" if last else "Enter — следующий способ"
+        if not step(console, args.step, hint):
+            return 0
     if args.step:
-        console.input("\n[dim]Enter — показать сравнение[/] ")
         console.clear()
 
     # При нескольких прогонах построчная таблица разрастается и мешает:
@@ -483,6 +499,9 @@ def main(argv=None) -> int:
     else:
         console.print(comparison_table(attempts, task))
     console.print(verdict(attempts, summarise(attempts)))
+    # В пошаговом режиме ждём: иначе программа закроется мгновенно
+    # и прочитать вывод будет невозможно.
+    step(console, args.step, "Enter — выход")
     return 0
 
 
