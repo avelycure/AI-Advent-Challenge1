@@ -51,13 +51,31 @@ from llmchat.strategies import (
 )
 from llmchat.ui import fmt, make_console, plural
 
-# Задача требует перебора вариантов: при 2600 половина ответов
-# не успевала дойти до итога, и сравнение получалось нечестным.
-ANSWER_MAX_TOKENS = 4200
+# Задача требует перебора вариантов, и ответы получаются длинными. Лимит
+# щедрый намеренно: обрезанный ответ нечестно сравнивать с полным, а у
+# бесплатных моделей окно вывода измеряется сотнями тысяч токенов.
+ANSWER_MAX_TOKENS = 9000
+# Промпт, который модель пишет себе, тоже обрезался — 600 токенов не хватало.
+SELF_PROMPT_MAX_TOKENS = 1800
 JUDGE_MAX_TOKENS = 120
 # Повышенная температура намеренно: при 0.2–0.3 модель отвечает почти
 # одинаково, и разница между способами постановки промпта не видна.
 TEMPERATURE = 0.9
+
+
+def complete_with_retry(client, model_ref: str, messages: List[dict],
+                        max_tokens: int, temperature: float, attempts: int = 2):
+    """Один повтор при сбое: бесплатные модели изредка возвращают пустой ответ."""
+    last: Optional[LLMError] = None
+    for number in range(attempts):
+        try:
+            return client.complete(model_ref, messages, max_tokens=max_tokens,
+                                   temperature=temperature)
+        except LLMError as exc:
+            last = exc
+            if number + 1 < attempts:
+                time.sleep(2.0)
+    raise last
 
 
 @dataclass
@@ -104,8 +122,8 @@ def sent_panel(messages: List[dict], accent: str, title: str) -> RenderableType:
         role = {"system": "системное сообщение", "user": "вопрос"}.get(
             message["role"], message["role"])
         body.append("[{}]\n".format(role), style="dim")
-        content = message["content"]
-        body.append(content if len(content) <= 900 else content[:900] + "…\n")
+        # Показываем запрос целиком: понять опыт без него нельзя.
+        body.append(message["content"])
         body.append("\n")
     return Panel(body, title=title, title_align="left",
                  border_style=accent, box=box.ROUNDED, padding=(0, 1))
@@ -127,13 +145,14 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
                                      strategy.accent,
                                      "Сначала просим модель написать промпт"))
         with console.status("[bold]модель пишет промпт…[/]", spinner="dots"):
-            completion = client.complete(model_ref, [{"role": "user", "content": prompt}],
-                                         max_tokens=600, temperature=temperature)
+            completion = complete_with_retry(
+                client, model_ref, [{"role": "user", "content": prompt}],
+                SELF_PROMPT_MAX_TOKENS, temperature)
         calls += 1
         tokens += completion.prompt_tokens + completion.completion_tokens
         artifact = completion.text
         if show:
-            console.print(Panel(Text(completion.text.strip()[:900]),
+            console.print(Panel(Text(completion.text.strip()),
                                 title="Промпт, который модель написала себе сама",
                                 title_align="left", border_style="magenta",
                                 box=box.ROUNDED, padding=(0, 1)))
@@ -151,8 +170,8 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
         console.print(sent_panel(messages, strategy.accent, "Отправляем в модель"))
     with console.status("[bold]{} — модель отвечает…[/]".format(strategy.title),
                         spinner="dots"):
-        completion = client.complete(model_ref, messages,
-                                     max_tokens=ANSWER_MAX_TOKENS, temperature=temperature)
+        completion = complete_with_retry(client, model_ref, messages,
+                                         ANSWER_MAX_TOKENS, temperature)
     calls += 1
     tokens += completion.prompt_tokens + completion.completion_tokens
 
@@ -176,17 +195,29 @@ def run_experts(console: Console, client, model_ref: str, task: Task,
         if show:
             console.print(sent_panel(messages, strategy.accent,
                                      "Отдельный запрос: {}".format(name)))
-        with console.status("[bold]{} отвечает…[/]".format(name), spinner="dots"):
-            completion = client.complete(model_ref, messages,
-                                         max_tokens=ANSWER_MAX_TOKENS,
-                                         temperature=temperature)
+        try:
+            with console.status("[bold]{} отвечает…[/]".format(name), spinner="dots"):
+                completion = complete_with_retry(client, model_ref, messages,
+                                                 ANSWER_MAX_TOKENS, temperature)
+        except LLMError as exc:
+            # Отказ одного эксперта не должен рушить весь опыт: записываем
+            # его как не ответившего и идём дальше.
+            parts.append((name, None))
+            pieces.append("### {}\n[не ответил: {}]".format(name, exc))
+            if show:
+                console.print(Panel(Text(str(exc), style="red"),
+                                    title="[bold red]{} не ответил[/]".format(name),
+                                    border_style="red", box=box.ROUNDED, padding=(0, 1)))
+                if pause:
+                    pause("Enter — следующий эксперт")
+            continue
         tokens += completion.prompt_tokens + completion.completion_tokens
         truncated = truncated or completion.finish_reason == "length"
         value = extract_answer(completion.text)
         parts.append((name, value))
         pieces.append("### {}\n{}".format(name, completion.text.strip()))
         if show:
-            console.print(Panel(Markdown(completion.text.strip()[:1200]),
+            console.print(Panel(Markdown(completion.text.strip()),
                                 title="[bold {}]{}[/]".format(strategy.accent, name),
                                 subtitle="[green]✓ {}[/]".format(value)
                                 if value == task.answer
@@ -222,7 +253,9 @@ def extract_final(console: Console, client, model_ref: str, attempt: Attempt) ->
     промежуточным. Поэтому итог достаёт модель, а регулярка остаётся запасным
     путём на случай отказа.
     """
-    prompt = EXTRACT_PROMPT.format(text=attempt.text[:4000])
+    # Берём хвост, а не начало: итог модель называет в конце, а ответы длинные,
+    # и первые тысячи символов — это середина рассуждения.
+    prompt = EXTRACT_PROMPT.format(text=attempt.text[-5000:])
     try:
         with console.status("[dim]извлекаю итог: {}…[/]".format(attempt.strategy.title),
                             spinner="dots"):
@@ -239,8 +272,11 @@ def extract_final(console: Console, client, model_ref: str, attempt: Attempt) ->
 
 def judge(console: Console, client, model_ref: str, task: Task,
           attempt: Attempt) -> None:
-    prompt = JUDGE_PROMPT.format(question=task.question, answer=task.answer,
-                                 text=attempt.text[:4000])
+    # Оценщику даём начало и конец: по одной середине о полноте не судят.
+    body = attempt.text
+    if len(body) > 6000:
+        body = body[:3000] + "\n\n[…середина пропущена…]\n\n" + body[-3000:]
+    prompt = JUDGE_PROMPT.format(question=task.question, answer=task.answer, text=body)
     # Одна повторная попытка: оценщик иногда отвечает не в том виде,
     # и терять из-за этого целую строку сравнения не хочется.
     for attempt_number in (1, 2):
@@ -320,7 +356,7 @@ def task_panel(task: Task, judge_name: str, temperature: float) -> RenderableTyp
                  border_style="bright_blue", box=box.ROUNDED, padding=(0, 1))
 
 
-def attempt_panel(attempt: Attempt, max_lines: int = 22) -> RenderableType:
+def attempt_panel(attempt: Attempt, max_lines: int = 38) -> RenderableType:
     lines = attempt.text.strip().splitlines()
     shown = "\n".join(lines[:max_lines])
     if len(lines) > max_lines:
