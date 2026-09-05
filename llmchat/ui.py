@@ -206,7 +206,8 @@ def choose_source(console: Console, sources, what: str, secret: bool) -> Optiona
     return None if choice == "0" else sources[int(choice) - 1].value
 
 
-def ask_extra_field(console: Console, provider: ProviderInfo, offer_saved: bool = True) -> str:
+def ask_extra_field(console: Console, provider: ProviderInfo, offer_saved: bool = True,
+                    title: Optional[str] = None) -> str:
     """Запросить дополнительный реквизит — например, каталог Yandex Cloud."""
     extra = provider.extra_field
     assert extra is not None
@@ -217,7 +218,8 @@ def ask_extra_field(console: Console, provider: ProviderInfo, offer_saved: bool 
     body.append("\n{}".format(extra.hint), style="dim")
 
     console.print()
-    console.print(Panel(body, title="Шаг 2 · Дополнительный реквизит", title_align="left",
+    console.print(Panel(body, title=title or "Шаг 2 · Дополнительный реквизит",
+                        title_align="left",
                         border_style=provider.accent, box=box.ROUNDED))
 
     if offer_saved:
@@ -260,7 +262,7 @@ def choose_model(console: Console, provider: ProviderInfo, step: int = 3) -> Mod
 
 
 def ask_token(console: Console, provider: ProviderInfo, step: int = 2,
-              offer_saved: bool = True) -> str:
+              offer_saved: bool = True, title: Optional[str] = None) -> str:
     body = Text()
     body.append("Нужен {} ".format(provider.key_phrase))
     body.append(provider.name, style="bold {}".format(provider.accent))
@@ -277,7 +279,8 @@ def ask_token(console: Console, provider: ProviderInfo, step: int = 2,
                         provider.key_files[0], provider.api_key_env), style="dim")
 
     console.print()
-    console.print(Panel(body, title="Шаг {} · {}".format(step, provider.key_title),
+    console.print(Panel(body,
+                        title=title or "Шаг {} · {}".format(step, provider.key_title),
                         title_align="left", border_style=provider.accent, box=box.ROUNDED))
 
     if offer_saved:
@@ -451,11 +454,12 @@ def build_message(message: Message, session: Session) -> RenderableType:
             box=box.ROUNDED,
             padding=(0, 1),
         )
+    accent = message.accent or session.provider.accent
     return Panel(
         Markdown(message.content),
-        title="[bold {}]🤖 {}[/]".format(session.provider.accent, session.model.id),
+        title="[bold {}]🤖 {}[/]".format(accent, message.model or session.model.id),
         title_align="left",
-        border_style=session.provider.accent,
+        border_style=accent,
         box=box.ROUNDED,
         padding=(0, 1),
     )
@@ -549,6 +553,8 @@ COMMANDS: List[tuple] = [
     ("/change_llm_params", "изменить параметры генерации; без аргументов — "
                            "таблица с текущими значениями"),
     ("/reset_llm_params", "вернуть параметры к значениям по умолчанию"),
+    ("/change_model", "сменить модель или провайдера; без аргументов — список с номерами"),
+    ("/retry", "переспросить последний вопрос на текущей модели, не меняя историю"),
     ("/new", "начать диалог заново (история очищается)"),
     ("/exit", "выход (также Ctrl+D)"),
 ]
@@ -558,6 +564,9 @@ COMBINE_HINTS: List[tuple] = [
     ("/change_llm_params stop=Вопрос:|Ответ:", "несколько стоп-строк, через |"),
     ('/change_llm_params stop="Вопрос пользователя:"', "значение с пробелами — в кавычках"),
     ("/change_llm_params reset", "то же, что /reset_llm_params"),
+    ("/change_model 7", "переключиться на модель под номером 7 из списка"),
+    ("/change_model gpt-4o", "то же самое по имени модели"),
+    ("/change_model openai gpt-4o", "если имя есть у нескольких провайдеров"),
 ]
 
 

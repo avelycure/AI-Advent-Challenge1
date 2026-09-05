@@ -21,6 +21,10 @@ DEFAULT_TOPIC = "Новый диалог"
 class Message:
     role: str  # "user" | "assistant"
     content: str
+    # Чей это ответ. Подпись хранится в самом сообщении, а не берётся из сессии:
+    # иначе после смены модели прежние ответы переклеились бы её именем.
+    model: str = ""
+    accent: str = ""
 
 
 @dataclass
@@ -51,16 +55,38 @@ class Session:
 
     # --- история -------------------------------------------------------
     def api_messages(self) -> List[Dict[str, str]]:
+        return self.api_messages_upto(len(self.messages) - 1)
+
+    def api_messages_upto(self, index: int) -> List[Dict[str, str]]:
+        """История по указанное сообщение включительно — для повторного запроса."""
         payload = [{"role": "system", "content": self.system_prompt}]
-        payload += [{"role": m.role, "content": m.content} for m in self.messages]
+        payload += [{"role": m.role, "content": m.content}
+                    for m in keep_last_answer(self.messages[:index + 1])]
         return payload
+
+    def last_user_index(self) -> int:
+        for index in range(len(self.messages) - 1, -1, -1):
+            if self.messages[index].role == "user":
+                return index
+        return -1
 
     def add_user(self, content: str) -> None:
         self.messages.append(Message("user", content))
 
     def add_assistant(self, content: str) -> None:
-        self.messages.append(Message("assistant", content))
+        self.messages.append(Message("assistant", content,
+                                     model=self.model.id, accent=self.provider.accent))
         self.exchanges += 1
+
+    def switch_to(self, provider: ProviderInfo, model: ModelInfo, model_ref: str) -> None:
+        """Сменить модель, сохранив историю, тему и общий счёт токенов."""
+        self.provider = provider
+        self.model = model
+        self.model_ref = model_ref
+        # Точный размер контекста измерен токенизатором прежней модели и после
+        # смены неверен, поэтому история снова оценивается локально.
+        self.exact_context = 0
+        self.exact_upto = 0
 
     def drop_last_user(self) -> None:
         """Убрать неотвеченное сообщение, чтобы история не осталась битой."""
@@ -143,3 +169,19 @@ class Session:
 
     def is_full(self) -> bool:
         return self.free_tokens() <= 0
+
+
+def keep_last_answer(messages: List[Message]) -> List[Message]:
+    """Из подряд идущих ответов оставить последний.
+
+    Ответы копятся, когда один вопрос переспрашивают на разных моделях: в истории
+    их видно все, но в запрос уходит только свежий — иначе модель получила бы
+    несколько ответов на один свой вопрос.
+    """
+    kept: List[Message] = []
+    for message in messages:
+        if kept and message.role == "assistant" and kept[-1].role == "assistant":
+            kept[-1] = message
+            continue
+        kept.append(message)
+    return kept

@@ -11,13 +11,12 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .client import LLMError, make_client
+from . import switching
+from .client import LLMError
 from .params import SPECS, GenerationParams, apply, format_value, parse_command
 from .session import Session
 from .tokens import tokenizer_name
 from .ui import (
-    ask_extra_field,
-    ask_token,
     choose_model,
     choose_provider,
     error_panel,
@@ -75,8 +74,14 @@ def enable_line_editing() -> None:
 # Запуск
 # --------------------------------------------------------------------------
 
-def setup(console: Console, demo: bool, banner=None, ask_keys: bool = False):
-    """Провести пользователя по шагам настройки и вернуть готовое состояние."""
+def setup(console: Console, demo: bool, banner=None, ask_keys: bool = False,
+          pool=None):
+    """Провести пользователя по шагам настройки и вернуть готовое состояние.
+
+    ``pool`` передаёт вызывающий, которому нужен доступ к введённым реквизитам
+    после настройки — например, чтобы потом переключать провайдера. Без него
+    пул создаётся на один раз, и возвращаемой четвёрки достаточно.
+    """
     (banner or show_banner)(console)
     provider = choose_provider(console)
 
@@ -88,31 +93,14 @@ def setup(console: Console, demo: bool, banner=None, ask_keys: bool = False):
             title="Режим проверки", style="yellow",
         ))
 
-    # У части провайдеров кроме ключа нужен ещё один реквизит — например,
-    # каталог Yandex Cloud, без которого не собрать адрес модели.
-    step = 2
-    extra: Optional[str] = None
-    if provider.extra_field is not None:
-        extra = ask_extra_field(console, provider, offer_saved=not ask_keys)
-        step += 1
+    if pool is None:
+        pool = switching.ClientPool(demo=demo, ask_keys=ask_keys)
+    ready = pool.ready_for(console, provider, step=2)
 
-    client = None
-    while client is None:
-        token = ask_token(console, provider, step=step, offer_saved=not ask_keys)
-        candidate = make_client(provider, token, demo)
-        console.print()
-        with console.status("[bold]Проверяю доступ…[/]", spinner="dots"):
-            try:
-                candidate.validate_key()
-            except LLMError as exc:
-                console.print(error_panel(str(exc)))
-                console.print("[dim]Попробуйте ввести ключ ещё раз (Ctrl+C — выход).[/]")
-                continue
-        console.print(info_panel("[green]Доступ подтверждён.[/]", title="Готово", style="green"))
-        client = candidate
-
-    model = choose_model(console, provider, step=step + 1)
-    return provider, model, provider.model_ref(model, extra), client
+    # Реквизит провайдера занимает отдельный шаг, и выбор модели съезжает на него.
+    model_step = 4 if provider.extra_field is not None else 3
+    model = choose_model(console, provider, step=model_step)
+    return provider, model, provider.model_ref(model, ready.extra), ready.client
 
 
 # --------------------------------------------------------------------------
@@ -274,7 +262,7 @@ def handle_params_command(session: Session, argument: str) -> RenderableType:
     return info_panel("\n".join(lines), title="Параметры генерации", style="cyan")
 
 
-def chat_loop(console: Console, client, session: Session) -> None:
+def chat_loop(console: Console, pool, session: Session) -> None:
     notice: Optional[RenderableType] = None
 
     while True:
@@ -312,6 +300,12 @@ def chat_loop(console: Console, client, session: Session) -> None:
                 notice = info_panel("Параметры генерации вернулись к значениям "
                                     "по умолчанию.", title="Сброшено", style="green")
                 continue
+            if command in ("/change_model", "/model", "/models"):
+                notice = switching.handle_command(console, pool, session, argument)
+                continue
+            if command == "/retry":
+                notice = retry_last(console, pool, session)
+                continue
             if command == "/new":
                 session.reset()
                 notice = info_panel("История очищена, контекст свободен.",
@@ -330,48 +324,14 @@ def chat_loop(console: Console, client, session: Session) -> None:
             continue
 
         render_frame(console, session)
-        try:
-            with console.status("[bold]{} думает…[/]".format(session.model.id), spinner="dots"):
-                completion = client.complete(
-                    session.model_ref,
-                    session.api_messages(),
-                    max_tokens=session.output_reserve,
-                    temperature=session.params.temperature,
-                    top_p=session.params.top_p,
-                    stop=session.params.stop,
-                    response_format=session.params.response_format_arg,
-                )
-        except LLMError as exc:
+        completion, notice = request_answer(console, pool, session, session.api_messages())
+        if completion is None:
             session.drop_last_user()
-            notice = error_panel(str(exc))
             continue
-        except KeyboardInterrupt:
-            session.drop_last_user()
-            notice = info_panel("Запрос отменён, сообщение не отправлено.",
-                                title="Отмена", style="yellow")
-            continue
-
-        session.add_assistant(completion.text)
-        session.record_main_usage(completion.prompt_tokens, completion.completion_tokens)
-
-        if completion.finish_reason == "length":
-            notice = warning_panel(
-                "Ответ обрезан: упёрся в max_tokens = {}. Модель не договорила. "
-                "Увеличьте лимит командой /change_llm_params max_tokens=… "
-                "или сбросьте параметры.".format(fmt(session.output_reserve)))
-
-        if completion.dropped_params:
-            notice = warning_panel(
-                "Провайдер не принял: {}. Параметр убран из запроса, чтобы диалог "
-                "не прервался, но он не действует.".format(
-                    ", ".join(completion.dropped_params)))
-        elif completion.notes:
-            notice = info_panel("\n".join(completion.notes),
-                                title="Запрос подправлен", style="cyan")
 
         if should_update_topic(session):
             with console.status("[dim]Определяю тему диалога…[/]", spinner="dots"):
-                update_topic(client, session)
+                update_topic(pool.current, session)
 
         if session.free_tokens() < session.avg_exchange_tokens() * 2:
             free = session.free_tokens()
@@ -384,18 +344,85 @@ def chat_loop(console: Console, client, session: Session) -> None:
     farewell(console, session)
 
 
+def request_answer(console: Console, pool, session: Session, messages):
+    """Один запрос к модели: спиннер, разбор ошибок, разбор замечаний.
+
+    Возвращает пару «ответ, замечание». Ответ равен None, если запрос не удался;
+    что делать с историей в этом случае, решает вызывающий.
+    """
+    try:
+        with console.status("[bold]{} думает…[/]".format(session.model.id), spinner="dots"):
+            completion = pool.current.complete(
+                session.model_ref,
+                messages,
+                max_tokens=session.output_reserve,
+                temperature=session.params.temperature,
+                top_p=session.params.top_p,
+                stop=session.params.stop,
+                response_format=session.params.response_format_arg,
+            )
+    except LLMError as exc:
+        return None, error_panel(str(exc))
+    except KeyboardInterrupt:
+        return None, info_panel("Запрос отменён, сообщение не отправлено.",
+                                title="Отмена", style="yellow")
+
+    session.add_assistant(completion.text)
+    session.record_main_usage(completion.prompt_tokens, completion.completion_tokens)
+    return completion, answer_notice(session, completion)
+
+
+def retry_last(console: Console, pool, session: Session) -> Optional[RenderableType]:
+    """Задать последний вопрос ещё раз — на той модели, что выбрана сейчас."""
+    index = session.last_user_index()
+    if index < 0:
+        return error_panel("Повторять нечего: в диалоге ещё не было вопросов.")
+
+    render_frame(console, session)
+    completion, notice = request_answer(console, pool, session,
+                                        session.api_messages_upto(index))
+    if completion is None:
+        return notice
+    return notice or info_panel(
+        "Вопрос задан ещё раз модели [bold]{}[/]. В запрос ушла история по этот "
+        "вопрос включительно — прежние ответы на него в неё не попали, поэтому "
+        "модели поставлена ровно та же задача.\n"
+        "[dim]Ответов на этот вопрос в переписке теперь {}; в следующий запрос "
+        "уйдёт только последний.[/]".format(
+            session.model.id, len(session.messages) - index - 1),
+        title="🔁 Переспрошено", style="cyan")
+
+
+def answer_notice(session: Session, completion) -> Optional[RenderableType]:
+    if completion.dropped_params:
+        return warning_panel(
+            "Провайдер не принял: {}. Параметр убран из запроса, чтобы диалог "
+            "не прервался, но он не действует.".format(
+                ", ".join(completion.dropped_params)))
+    if completion.notes:
+        return info_panel("\n".join(completion.notes),
+                          title="Запрос подправлен", style="cyan")
+    if completion.finish_reason == "length":
+        return warning_panel(
+            "Ответ обрезан: упёрся в max_tokens = {}. Модель не договорила. "
+            "Увеличьте лимит командой /change_llm_params max_tokens=… "
+            "или сбросьте параметры.".format(fmt(session.output_reserve)))
+    return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     enable_line_editing()
     console = make_console()
 
+    pool = switching.ClientPool(demo=args.demo, ask_keys=args.ask_keys)
     try:
-        provider, model, model_ref, client = setup(console, args.demo,
-                                                   ask_keys=args.ask_keys)
+        provider, model, model_ref, _ = setup(console, args.demo,
+                                              ask_keys=args.ask_keys, pool=pool)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Отменено.[/]")
         return 130
 
     session = Session(provider=provider, model=model, model_ref=model_ref)
-    chat_loop(console, client, session)
+    chat_loop(console, pool, session)
     return 0

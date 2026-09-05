@@ -16,6 +16,7 @@
 | [feature-free-providers.md](feature-free-providers.md) | OpenRouter и Google Gemini — модели без оплаты |
 | [feature-reasoning.md](feature-reasoning.md) | четыре способа поставить одну задачу; там же — переснятое задание 2 про пять рычагов |
 | [feature-groq.md](feature-groq.md) | Groq — восьмой провайдер, ещё один источник без оплаты |
+| [feature-model-switch.md](feature-model-switch.md) | смена модели и провайдера во время диалога, повтор вопроса |
 
 Все эти работы собраны в одной ветке `feature/llm-params`: сначала они велись
 по отдельным веткам, но это раздробило связанные правки одних и тех же файлов
