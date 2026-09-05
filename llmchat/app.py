@@ -18,6 +18,9 @@ from .session import Session
 from .tokens import tokenizer_name
 from .ui import (
     choose_model,
+    format_cost,
+    format_seconds,
+    session_cost_label,
     choose_provider,
     error_panel,
     fmt,
@@ -136,7 +139,7 @@ def update_topic(client, session: Session) -> None:
     topic = clean_topic(completion.text)
     if topic:
         session.topic = topic
-    session.record_side_usage(completion.prompt_tokens, completion.completion_tokens)
+    session.record_side_request(completion)
 
 
 def should_update_topic(session: Session) -> bool:
@@ -171,10 +174,31 @@ def stats_panel(session: Session) -> RenderableType:
     table.add_row("Запросов к API", str(session.requests))
     table.add_row("Токенов отправлено", fmt(session.total_prompt_tokens))
     table.add_row("Токенов получено", fmt(session.total_completion_tokens))
+    if session.total_reasoning_tokens:
+        table.add_row("Из них на размышление", "{} (входят в полученные)".format(
+            fmt(session.total_reasoning_tokens)))
     table.add_row("Всего потрачено", fmt(session.total_tokens))
+    table.add_row("Время в запросах", format_seconds(session.total_seconds))
+    table.add_row("В среднем на запрос", format_seconds(session.avg_seconds))
+    table.add_row("Цена модели за 1M", price_label(session.provider, session.model))
+    table.add_row("Стоимость сессии", session_cost_label(session))
+    if session.unpriced_requests:
+        table.add_row("Не посчитано", "{} {} — цена модели не задана".format(
+            session.unpriced_requests,
+            plural(session.unpriced_requests, ("запрос", "запроса", "запросов"))))
     table.add_row("Оценка неотправленного", tokenizer_name())
     return Panel(table, title="📊 Статистика сессии", title_align="left",
                  border_style="magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def price_label(provider, model) -> str:
+    """Цена текущей модели: вход и выход за миллион токенов."""
+    if provider.free:
+        return "бесплатный тариф"
+    if not model.priced:
+        return "не задана"
+    return "{} вход · {} выход".format(format_cost(model.input_price),
+                                       format_cost(model.output_price))
 
 
 def params_panel(session: Session) -> RenderableType:
@@ -367,8 +391,7 @@ def request_answer(console: Console, pool, session: Session, messages):
         return None, info_panel("Запрос отменён, сообщение не отправлено.",
                                 title="Отмена", style="yellow")
 
-    session.add_assistant(completion.text)
-    session.record_main_usage(completion.prompt_tokens, completion.completion_tokens)
+    session.record_answer(completion)
     return completion, answer_notice(session, completion)
 
 

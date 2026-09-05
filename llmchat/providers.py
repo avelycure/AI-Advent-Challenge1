@@ -27,10 +27,19 @@ class ModelInfo:
     max_output: int
     # Поля тела запроса, которые нужны именно этой модели.
     extra_body: Dict[str, object] = field(default_factory=dict)
+    # Цена за миллион токенов в долларах. None означает «цена неизвестна»:
+    # программа покажет прочерк, а не выдуманное число.
+    input_price: Optional[float] = None
+    output_price: Optional[float] = None
+    cached_price: Optional[float] = None
 
     @property
     def output_reserve(self) -> int:
         return min(self.max_output, OUTPUT_RESERVE_CAP)
+
+    @property
+    def priced(self) -> bool:
+        return self.input_price is not None and self.output_price is not None
 
 
 @dataclass(frozen=True)
@@ -80,6 +89,8 @@ class ProviderInfo:
     # Поля тела запроса, которые понимает только этот провайдер.
     extra_body: Dict[str, object] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    # Тариф без оплаты: считать такие запросы по нулю честнее, чем прочерком.
+    free: bool = False
 
     @property
     def default_model(self) -> ModelInfo:
@@ -101,6 +112,25 @@ class ProviderInfo:
         return body
 
 
+def request_cost(provider: ProviderInfo, model: ModelInfo, prompt_tokens: int,
+                 completion_tokens: int, cached_tokens: int = 0) -> Optional[float]:
+    """Стоимость одного запроса в долларах. None — если цена модели неизвестна.
+
+    Токены размышления отдельно не считаются: провайдер уже включил их в
+    ``completion_tokens`` и тарифицирует как обычный выход.
+    """
+    if provider.free:
+        return 0.0
+    if not model.priced:
+        return None
+    cached = max(0, min(cached_tokens, prompt_tokens))
+    cached_price = model.cached_price if model.cached_price is not None else model.input_price
+    total = ((prompt_tokens - cached) * model.input_price
+             + cached * cached_price
+             + completion_tokens * model.output_price)
+    return total / 1_000_000
+
+
 PROVIDERS: Dict[str, ProviderInfo] = {
     "openai": ProviderInfo(
         key="openai",
@@ -113,14 +143,19 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         key_files=["~/.openai-key", "~/.config/llm-chat/openai.key"],
         models=[
             ModelInfo("gpt-5.4-mini", "GPT-5.4 mini — быстрая и дешёвая, вход до 272k",
-                      400_000, 128_000),
+                      400_000, 128_000,
+                      input_price=0.75, output_price=4.50, cached_price=0.075),
             ModelInfo("gpt-5.4-nano", "GPT-5.4 nano — самая дешёвая, вход до 272k",
-                      400_000, 128_000),
-            ModelInfo("gpt-5.4", "GPT-5.4 — окно на 1,05 млн токенов", 1_050_000, 128_000),
+                      400_000, 128_000,
+                      input_price=0.20, output_price=1.25, cached_price=0.02),
+            ModelInfo("gpt-5.4", "GPT-5.4 — окно на 1,05 млн токенов", 1_050_000, 128_000,
+                      input_price=2.50, output_price=15.00, cached_price=0.25),
             ModelInfo("gpt-5.5", "GPT-5.5 — сильнее 5.4; temperature не принимает",
-                      1_050_000, 128_000),
+                      1_050_000, 128_000,
+                      input_price=5.00, output_price=30.00, cached_price=0.50),
             ModelInfo("gpt-6-astra", "GPT-6 Astra — новейшая; temperature не принимает",
-                      1_050_000, 128_000),
+                      1_050_000, 128_000,
+                      input_price=10.00, output_price=50.00, cached_price=1.00),
         ],
     ),
     "deepseek": ProviderInfo(
@@ -208,6 +243,7 @@ PROVIDERS: Dict[str, ProviderInfo] = {
                "Бесплатные модели делят общую очередь и временами отвечают отказом "
                "«перегружена». По проверке MiniMax отвечает стабильнее и быстрее, "
                "GLM — рассуждающая модель, ей нужен max_tokens побольше."],
+        free=True,
     ),
     "groq": ProviderInfo(
         key="groq",
@@ -243,6 +279,7 @@ PROVIDERS: Dict[str, ProviderInfo] = {
                "поэтому длинный диалог упрётся в него раньше, чем в размер окна.",
                "Llama 3.1 и 3.3 из документации обычному ключу не выдаются: Groq "
                "перевёл их в тариф Enterprise."],
+        free=True,
     ),
     "gemini": ProviderInfo(
         key="gemini",

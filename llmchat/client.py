@@ -47,6 +47,15 @@ class Completion:
     dropped_params: List[str] = field(default_factory=list)
     # Что программа изменила в запросе сама, чтобы он прошёл.
     notes: List[str] = field(default_factory=list)
+    # Сколько секунд заняли отправка, ожидание и получение ответа. Повторы
+    # после отказа провайдера входят сюда же: столько запрос и правда занял.
+    elapsed: float = 0.0
+    # Скрытое размышление рассуждающих моделей. Уже входит в completion_tokens
+    # и тарифицируется как выход, но без отдельной строки непонятно, за что
+    # заплачено: ответ в пять символов может стоить как страница текста.
+    reasoning_tokens: int = 0
+    # Часть входа, зачтённая провайдером по кешу и потому более дешёвая.
+    cached_tokens: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -215,6 +224,21 @@ def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> Tuple[bool, 
     return changed, reported
 
 
+def _usage_detail(usage: object, group: str, name: str) -> int:
+    """Поле из вложенной детализации usage.
+
+    SDK отдаёт её объектом, часть прокси — словарём, поэтому читаем обоими
+    способами: иначе на прокси счётчик молча становится нулём.
+    """
+    holder = getattr(usage, group, None)
+    if holder is None and isinstance(usage, dict):
+        holder = usage.get(group)
+    if holder is None:
+        return 0
+    value = holder.get(name) if isinstance(holder, dict) else getattr(holder, name, 0)
+    return int(value or 0)
+
+
 def _mentioned(name: str, error_text: str) -> bool:
     """Назван ли параметр в тексте ошибки: подчёркивания в нём непостоянны."""
     return name.replace("_", "") in error_text.replace("_", "")
@@ -319,6 +343,7 @@ class LLMClient:
         if self._json_word_required and _is_json_mode(response_format):
             _require_json_in_prompt(kwargs)
 
+        started = time.perf_counter()
         for attempt in range(ADAPT_ATTEMPTS):
             try:
                 response = self._client.chat.completions.create(**kwargs)
@@ -339,7 +364,11 @@ class LLMClient:
             raise LLMError("Модель вернула пустой текст ответа.")
         finish_reason = getattr(choice, "finish_reason", "stop") or "stop"
 
+        elapsed = time.perf_counter() - started
+
         usage = getattr(response, "usage", None)
+        reasoning_tokens = _usage_detail(usage, "completion_tokens_details", "reasoning_tokens")
+        cached_tokens = _usage_detail(usage, "prompt_tokens_details", "cached_tokens")
         if usage is not None:
             prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
             completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -354,7 +383,8 @@ class LLMClient:
             # Некоторые прокси не возвращают usage — оцениваем сами.
             prompt_tokens = count_message_tokens(messages)
             completion_tokens = count_text_tokens(text)
-        return Completion(text, prompt_tokens, completion_tokens, finish_reason, dropped, notes)
+        return Completion(text, prompt_tokens, completion_tokens, finish_reason, dropped,
+                          notes, elapsed, reasoning_tokens, cached_tokens)
 
 
 class GigaChatAuth:
@@ -479,6 +509,7 @@ class DemoClient:
         stop: Optional[List[str]] = None,
         response_format: Optional[Dict[str, str]] = None,
     ) -> Completion:
+        started = time.perf_counter()
         time.sleep(random.uniform(1.2, 2.2))
         last_user = next(
             (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
@@ -493,6 +524,7 @@ class DemoClient:
             text=text,
             prompt_tokens=count_message_tokens(messages),
             completion_tokens=count_text_tokens(text),
+            elapsed=time.perf_counter() - started,
         )
 
 

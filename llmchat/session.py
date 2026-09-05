@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .params import GenerationParams
-from .providers import ModelInfo, ProviderInfo
+from .providers import ModelInfo, ProviderInfo, request_cost
 from .tokens import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
 
 SYSTEM_PROMPT = (
@@ -25,6 +25,13 @@ class Message:
     # иначе после смены модели прежние ответы переклеились бы её именем.
     model: str = ""
     accent: str = ""
+    # Что стоил этот ответ. Метрики держатся при сообщении, а не в сессии,
+    # чтобы после смены модели можно было сравнить ответы между собой.
+    elapsed: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost: Optional[float] = None
 
 
 @dataclass
@@ -44,6 +51,12 @@ class Session:
     requests: int = 0
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
+    total_reasoning_tokens: int = 0
+    total_seconds: float = 0.0
+    total_cost: float = 0.0
+    # Запросы к моделям, цена которых не задана: без этого счётчика итоговая
+    # сумма выглядела бы полной, хотя часть расхода в неё не вошла.
+    unpriced_requests: int = 0
 
     # Точный размер диалога по данным API и число сообщений, которое он покрывает.
     exact_context: int = 0
@@ -101,17 +114,42 @@ class Session:
         self.exact_upto = 0
 
     # --- учёт токенов --------------------------------------------------
-    def record_main_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
-        """Ответ основного диалога: и в общий счёт, и в точный размер контекста."""
-        self.record_side_usage(prompt_tokens, completion_tokens)
-        self.exact_context = prompt_tokens + completion_tokens
+    def record_answer(self, completion) -> None:
+        """Записать ответ диалога вместе с его метриками и стоимостью."""
+        self.add_assistant(completion.text)
+        answer = self.messages[-1]
+        answer.elapsed = completion.elapsed
+        answer.prompt_tokens = completion.prompt_tokens
+        answer.completion_tokens = completion.completion_tokens
+        answer.reasoning_tokens = completion.reasoning_tokens
+        answer.cost = self.cost_of(completion)
+
+        self.record_side_request(completion)
+        self.exact_context = completion.prompt_tokens + completion.completion_tokens
         self.exact_upto = len(self.messages)
 
-    def record_side_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
-        """Служебный запрос (например, генерация темы): только в общий счёт."""
-        self.total_prompt_tokens += prompt_tokens
-        self.total_completion_tokens += completion_tokens
+    def record_side_request(self, completion) -> None:
+        """Служебный запрос (например, за темой): только в общий счёт."""
+        self.total_prompt_tokens += completion.prompt_tokens
+        self.total_completion_tokens += completion.completion_tokens
+        self.total_reasoning_tokens += completion.reasoning_tokens
+        self.total_seconds += completion.elapsed
         self.requests += 1
+
+        cost = self.cost_of(completion)
+        if cost is None:
+            self.unpriced_requests += 1
+        else:
+            self.total_cost += cost
+
+    def cost_of(self, completion) -> Optional[float]:
+        """Стоимость запроса по цене той модели, что отвечает сейчас."""
+        return request_cost(self.provider, self.model, completion.prompt_tokens,
+                            completion.completion_tokens, completion.cached_tokens)
+
+    @property
+    def avg_seconds(self) -> float:
+        return self.total_seconds / self.requests if self.requests else 0.0
 
     @property
     def total_tokens(self) -> int:

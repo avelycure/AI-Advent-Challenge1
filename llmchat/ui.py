@@ -113,6 +113,40 @@ def fmt(number: int) -> str:
 # Экран запуска
 # --------------------------------------------------------------------------
 
+def format_seconds(seconds: float) -> str:
+    if seconds < 10:
+        return "{:.1f} с".format(seconds)
+    if seconds < 60:
+        return "{:.0f} с".format(seconds)
+    return "{:.0f} мин {:02.0f} с".format(seconds // 60, seconds % 60)
+
+
+def format_cost(usd: Optional[float]) -> str:
+    """Цена в долларах. Прочерк означает, что цена модели не задана."""
+    if usd is None:
+        return "—"
+    if usd == 0:
+        return "бесплатно"
+    if usd < 0.000001:
+        # Иначе округление до шести знаков даёт «$0.» и выглядит как ошибка.
+        return "<$0.000001"
+    if usd < 0.001:
+        return "${}".format("{:.6f}".format(usd).rstrip("0"))
+    if usd < 1:
+        return "${:.4f}".format(usd)
+    return "${:.2f}".format(usd)
+
+
+def session_cost_label(session: Session) -> str:
+    """Итог по сессии. «≥» означает, что часть запросов посчитать не удалось."""
+    if session.requests == 0:
+        return "—"
+    if session.unpriced_requests and not session.total_cost:
+        return "—"
+    label = format_cost(session.total_cost)
+    return "≥ " + label if session.unpriced_requests else label
+
+
 def show_banner(console: Console) -> None:
     console.clear()
     title = Text("✨  LLM CHAT", style="bold white")
@@ -397,6 +431,8 @@ def build_stats(session: Session, width: int) -> RenderableType:
         session.requests,
         plural(session.requests, ("запрос", "запроса", "запросов")),
     ), style="dim")
+    right_bottom.append(" · ", style="grey35")
+    right_bottom.append(session_cost_label(session), style="magenta")
 
     # Рамка съедает 2 символа, внутренние отступы — ещё 2; между колонками нужен зазор.
     inner = width - 4
@@ -459,10 +495,29 @@ def build_message(message: Message, session: Session) -> RenderableType:
         Markdown(message.content),
         title="[bold {}]🤖 {}[/]".format(accent, message.model or session.model.id),
         title_align="left",
+        subtitle=answer_metrics(message),
+        subtitle_align="right",
         border_style=accent,
         box=box.ROUNDED,
         padding=(0, 1),
     )
+
+
+def answer_metrics(message: Message) -> Optional[Text]:
+    """Подпись под ответом: чего стоил именно этот запрос."""
+    if not message.completion_tokens and not message.elapsed:
+        return None
+    line = Text(no_wrap=True)
+    line.append(format_seconds(message.elapsed), style="dim")
+    line.append(" · ", style="grey35")
+    line.append("{} → {} ток.".format(fmt(message.prompt_tokens),
+                                      fmt(message.completion_tokens)), style="dim")
+    if message.reasoning_tokens:
+        line.append(" · ", style="grey35")
+        line.append("размышление {}".format(fmt(message.reasoning_tokens)), style="yellow")
+    line.append(" · ", style="grey35")
+    line.append(format_cost(message.cost), style="magenta")
+    return line
 
 
 def _height(console: Console, renderable: RenderableType) -> int:
