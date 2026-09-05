@@ -199,7 +199,7 @@ def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> Tuple[bool, 
         return False, []
 
     reported: List[str] = []
-    for name in ("response_format", "stop", "top_p"):
+    for name in ("response_format", "stop", "top_p", "temperature"):
         if name in kwargs and _mentioned(name, text):
             kwargs.pop(name)
             reported.append(name)

@@ -565,8 +565,8 @@ COMBINE_HINTS: List[tuple] = [
     ('/change_llm_params stop="Вопрос пользователя:"', "значение с пробелами — в кавычках"),
     ("/change_llm_params reset", "то же, что /reset_llm_params"),
     ("/change_model 7", "переключиться на модель под номером 7 из списка"),
-    ("/change_model gpt-4o", "то же самое по имени модели"),
-    ("/change_model openai gpt-4o", "если имя есть у нескольких провайдеров"),
+    ("/change_model gpt-5.5", "то же самое по имени модели"),
+    ("/change_model openai gpt-5.5", "если имя есть у нескольких провайдеров"),
 ]
 
 

@@ -112,9 +112,15 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         key_hint="ключ начинается с sk-",
         key_files=["~/.openai-key", "~/.config/llm-chat/openai.key"],
         models=[
-            ModelInfo("gpt-4o-mini", "GPT-4o mini — быстрый и дешёвый", 128_000, 16_384),
-            ModelInfo("gpt-4o", "GPT-4o — самый сильный из классических", 128_000, 16_384),
-            ModelInfo("gpt-4.1-mini", "GPT-4.1 mini — окно на 1 млн токенов", 1_047_576, 32_768),
+            ModelInfo("gpt-5.4-mini", "GPT-5.4 mini — быстрая и дешёвая, вход до 272k",
+                      400_000, 128_000),
+            ModelInfo("gpt-5.4-nano", "GPT-5.4 nano — самая дешёвая, вход до 272k",
+                      400_000, 128_000),
+            ModelInfo("gpt-5.4", "GPT-5.4 — окно на 1,05 млн токенов", 1_050_000, 128_000),
+            ModelInfo("gpt-5.5", "GPT-5.5 — сильнее 5.4; temperature не принимает",
+                      1_050_000, 128_000),
+            ModelInfo("gpt-6-astra", "GPT-6 Astra — новейшая; temperature не принимает",
+                      1_050_000, 128_000),
         ],
     ),
     "deepseek": ProviderInfo(

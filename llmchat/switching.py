@@ -50,7 +50,7 @@ def catalog_panel(session: Session, pool: "ClientPool") -> RenderableType:
         "\n[dim]Текущая модель — жёлтым. «спросит» значит, что при первом переходе "
         "к провайдеру понадобится ключ; дальше он запомнен до конца работы.[/]\n"
         "[cyan]/change_model 7[/][dim] — по номеру · [/]"
-        "[cyan]/change_model gpt-4o[/][dim] — по имени · [/]"
+        "[cyan]/change_model gpt-5.5[/][dim] — по имени · [/]"
         "[cyan]/retry[/][dim] — переспросить последний вопрос на текущей модели[/]")
     return Panel(Group(table, hint), title="🔀 Модели", title_align="left",
                  border_style="cyan", box=box.ROUNDED, padding=(0, 1))
