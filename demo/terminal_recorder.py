@@ -165,6 +165,15 @@ class TerminalRecorder:
                 break
         return " ".join(collected)
 
+    @property
+    def alive(self) -> bool:
+        """Работает ли ещё записываемое приложение.
+
+        Экран после выхода сохраняет последний кадр, поэтому поиск текста
+        по нему возвращает истину и для уже завершившейся программы.
+        """
+        return self._alive
+
     # --- шаги сценария ------------------------------------------------
     def wait_for(self, pattern: str, timeout: float = 30.0) -> bool:
         deadline = time.time() + timeout
