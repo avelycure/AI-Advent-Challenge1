@@ -16,16 +16,17 @@ from .params import SPECS, GenerationParams, apply, format_value, parse_command
 from .session import Session
 from .tokens import tokenizer_name
 from .ui import (
-    HELP_TEXT,
     ask_extra_field,
     ask_token,
     choose_model,
     choose_provider,
     error_panel,
     fmt,
+    help_panel,
     info_panel,
     make_console,
     plural,
+    read_user_line,
     render_frame,
     render_history,
     show_banner,
@@ -208,6 +209,7 @@ def params_panel(session: Session) -> RenderableType:
     for name, spec in SPECS.items():
         changed = getattr(session.params, name) != getattr(default, name)
         explain = Text(spec.description, style="dim")
+        explain.append("\nдопустимо: " + spec.limits, style="dim italic")
         for example in spec.examples:
             explain.append("\n  /change_llm_params " + example, style="cyan")
         table.add_row(
@@ -243,6 +245,10 @@ def farewell(console: Console, session: Session) -> None:
 # Основной цикл
 # --------------------------------------------------------------------------
 
+PARAMS_HINT = ("\n[dim]Список параметров с примерами: [/][bold]/help[/][dim] "
+               "или [/][bold]/change_llm_params[/][dim] без аргументов.[/]")
+
+
 def handle_params_command(session: Session, argument: str) -> RenderableType:
     """Применить /change_llm_params и вернуть панель с результатом."""
     updates, errors, reset = parse_command(argument)
@@ -256,14 +262,14 @@ def handle_params_command(session: Session, argument: str) -> RenderableType:
         return params_panel(session)
 
     if errors and not updates:
-        return error_panel("\n".join(errors))
+        return error_panel("\n".join(errors) + PARAMS_HINT)
 
     session.params = apply(session.params, updates)
     lines = ["Применено: " + ", ".join(
         "[bold]{}[/]=[yellow]{}[/]".format(name, format_value(value))
         for name, value in updates.items())]
     if errors:
-        lines.append("[red]Не принято: {}[/]".format("; ".join(errors)))
+        lines.append("[red]Не принято: {}[/]{}".format("; ".join(errors), PARAMS_HINT))
     lines.append("[dim]Действует для всех следующих запросов.[/]")
     return info_panel("\n".join(lines), title="Параметры генерации", style="cyan")
 
@@ -276,7 +282,7 @@ def chat_loop(console: Console, client, session: Session) -> None:
         notice = None
 
         try:
-            raw = console.input("[bold cyan]Вы ›[/] ").strip()
+            raw = read_user_line(console, "[bold cyan]Вы ›[/] ")
         except (EOFError, KeyboardInterrupt):
             console.print()
             break
@@ -290,7 +296,7 @@ def chat_loop(console: Console, client, session: Session) -> None:
             if command in ("/exit", "/quit", "/q"):
                 break
             if command == "/help":
-                notice = info_panel(HELP_TEXT, title="Команды")
+                notice = help_panel()
                 continue
             if command == "/stats":
                 notice = stats_panel(session)
@@ -359,6 +365,9 @@ def chat_loop(console: Console, client, session: Session) -> None:
                 "Провайдер не принял: {}. Параметр убран из запроса, чтобы диалог "
                 "не прервался, но он не действует.".format(
                     ", ".join(completion.dropped_params)))
+        elif completion.notes:
+            notice = info_panel("\n".join(completion.notes),
+                                title="Запрос подправлен", style="cyan")
 
         if should_update_topic(session):
             with console.status("[dim]Определяю тему диалога…[/]", spinner="dots"):

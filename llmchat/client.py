@@ -7,10 +7,11 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -44,6 +45,8 @@ class Completion:
     # Параметры, которые провайдер не принял и которые пришлось убрать.
     # Без этого списка отключение параметра выглядело бы как его применение.
     dropped_params: List[str] = field(default_factory=list)
+    # Что программа изменила в запросе сама, чтобы он прошёл.
+    notes: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -129,21 +132,92 @@ def describe_error(exc: Exception) -> str:
     return "{}: {}".format(name, _compact(text) or "неизвестная ошибка")
 
 
-def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> List[str]:
+# Сколько раз запрос можно переписать под отказ провайдера, прежде чем сдаться.
+ADAPT_ATTEMPTS = 4
+
+# Отказ вида «в запросе должно встречаться слово json».
+JSON_WORD_REQUIRED = re.compile(r"must contain the word .?json", re.IGNORECASE)
+JSON_INSTRUCTION = "Ответ верни строго в формате JSON и ничем больше."
+JSON_HINT_NOTE = ("провайдер требует, чтобы формат был назван и в самом запросе — "
+                  "в него добавлено требование ответить в формате JSON")
+
+
+def _adapt_request(exc: Exception, kwargs: Dict[str, object], reported: List[str],
+                   notes: List[str], max_tokens: int) -> bool:
+    """Подстроить запрос под отказ провайдера. False — подстраивать нечего.
+
+    Провайдер называет в ошибке одно поле за раз, поэтому подстройка вызывается
+    в цикле: например, groq/compound отвергает сначала reasoning_format,
+    а на следующем запросе — reasoning_effort.
+    """
+    text = str(exc)
+    if "max_tokens" in kwargs and "max_tokens" in text and "max_completion_tokens" in text:
+        # Новые модели OpenAI принимают max_completion_tokens вместо max_tokens.
+        kwargs.pop("max_tokens")
+        kwargs["max_completion_tokens"] = max_tokens
+        return True
+
+    if JSON_WORD_REQUIRED.search(text) and _require_json_in_prompt(kwargs):
+        notes.append(JSON_HINT_NOTE)
+        return True
+
+    changed, names = _drop_unsupported(exc, kwargs)
+    reported.extend(names)
+    return changed
+
+
+def _is_json_mode(response_format: Optional[Dict[str, str]]) -> bool:
+    return bool(response_format) and response_format.get("type") == "json_object"
+
+
+def _require_json_in_prompt(kwargs: Dict[str, object]) -> bool:
+    """Дописать в запрос требование JSON. False — оно там уже есть.
+
+    OpenAI, DeepSeek и Groq принимают response_format=json_object только если
+    слово «json» встречается в самом запросе: иначе модель не знает, чего от неё
+    хотят, и провайдер отказывается угадывать за неё.
+    """
+    messages = kwargs.get("messages")
+    if not isinstance(messages, list):
+        return False
+    if any("json" in str(item.get("content", "")).lower() for item in messages):
+        return False
+    kwargs["messages"] = [{"role": "system", "content": JSON_INSTRUCTION}] + list(messages)
+    return True
+
+
+def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> Tuple[bool, List[str]]:
     """Убрать из запроса параметры, которые провайдер не принимает.
 
-    Возвращает список убранных имён, чтобы можно было честно сказать
-    пользователю, что параметр не применился, а не молчать об этом.
+    Возвращает признак того, что запрос изменился и его стоит повторить, и
+    список имён для показа пользователю. Списки разные: параметры генерации
+    пользователь задавал сам и должен узнать, что они не применились, а
+    служебные поля провайдера он не выбирал, и сообщать о них незачем.
     """
     text = error_chain_text(exc).lower()
     if not any(marker in text for marker in ("400", "unsupported", "unknown", "invalid")):
-        return []
-    removed: List[str] = []
+        return False, []
+
+    reported: List[str] = []
     for name in ("response_format", "stop", "top_p"):
-        if name in kwargs and name.replace("_", "") in text.replace("_", ""):
+        if name in kwargs and _mentioned(name, text):
             kwargs.pop(name)
-            removed.append(name)
-    return removed
+            reported.append(name)
+
+    changed = bool(reported)
+    extra = kwargs.get("extra_body")
+    if isinstance(extra, dict):
+        for name in [key for key in extra if _mentioned(key, text)]:
+            extra.pop(name)
+            changed = True
+        if not extra:
+            kwargs.pop("extra_body")
+    return changed, reported
+
+
+def _mentioned(name: str, error_text: str) -> bool:
+    """Назван ли параметр в тексте ошибки: подчёркивания в нём непостоянны."""
+    return name.replace("_", "") in error_text.replace("_", "")
 
 
 def _endpoint_unsupported(exc: Exception) -> bool:
@@ -171,6 +245,9 @@ class LLMClient:
         from openai import OpenAI
 
         self.provider = provider
+        # Провайдер сообщает об этом только отказом на первый запрос, поэтому
+        # запоминаем: иначе каждое следующее сообщение стоило бы лишнего отказа.
+        self._json_word_required = False
         self._client = OpenAI(
             api_key=api_key,
             base_url=provider.base_url,
@@ -231,27 +308,27 @@ class LLMClient:
             kwargs["stop"] = stop
         if response_format:
             kwargs["response_format"] = response_format
+        # SDK не пропускает незнакомые ему поля как обычные аргументы,
+        # поэтому специфичные для провайдера кладём в тело запроса напрямую.
+        extra_body = self.provider.extra_body_for(model_ref)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         dropped: List[str] = []
-        try:
-            response = self._client.chat.completions.create(**kwargs)
-        except Exception as exc:  # noqa: BLE001
-            # Новые модели OpenAI принимают max_completion_tokens вместо max_tokens.
-            if "max_tokens" in str(exc) and "max_completion_tokens" in str(exc):
-                kwargs.pop("max_tokens")
-                kwargs["max_completion_tokens"] = max_tokens
-                try:
-                    response = self._client.chat.completions.create(**kwargs)
-                except Exception as retry_exc:  # noqa: BLE001
-                    raise LLMError(describe_error(retry_exc)) from retry_exc
-            else:
-                dropped = _drop_unsupported(exc, kwargs)
-                if not dropped:
+        notes: List[str] = []
+        if self._json_word_required and _is_json_mode(response_format):
+            _require_json_in_prompt(kwargs)
+
+        for attempt in range(ADAPT_ATTEMPTS):
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last = attempt == ADAPT_ATTEMPTS - 1
+                if last or not _adapt_request(exc, kwargs, dropped, notes, max_tokens):
                     raise LLMError(describe_error(exc)) from exc
-                try:
-                    response = self._client.chat.completions.create(**kwargs)
-                except Exception as retry_exc:  # noqa: BLE001
-                    raise LLMError(describe_error(retry_exc)) from retry_exc
+                if notes and JSON_HINT_NOTE in notes:
+                    self._json_word_required = True
 
         if not response.choices:
             raise LLMError("Модель вернула пустой ответ без вариантов.")
@@ -277,7 +354,7 @@ class LLMClient:
             # Некоторые прокси не возвращают usage — оцениваем сами.
             prompt_tokens = count_message_tokens(messages)
             completion_tokens = count_text_tokens(text)
-        return Completion(text, prompt_tokens, completion_tokens, finish_reason, dropped)
+        return Completion(text, prompt_tokens, completion_tokens, finish_reason, dropped, notes)
 
 
 class GigaChatAuth:

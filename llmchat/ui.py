@@ -1,6 +1,10 @@
 """Отрисовка интерфейса в терминале на rich."""
 from __future__ import annotations
 
+import os
+import re
+import sys
+import termios
 from typing import List, Optional
 
 from rich import box
@@ -12,6 +16,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
+from .params import SPECS
 from .providers import PROVIDER_ORDER, PROVIDERS, ModelInfo, ProviderInfo
 from .secrets import find_sources, mask
 from .session import Message, Session
@@ -22,6 +27,81 @@ USER_ACCENT = "cyan"
 
 def make_console() -> Console:
     return Console(highlight=False)
+
+
+def read_user_line(console: Console, prompt: str) -> str:
+    """Прочитать реплику пользователя, не разрывая вставку из буфера обмена.
+
+    Терминал отдаёт вставленный текст как обычный набор, поэтому перевод строки
+    внутри вставки для ``input()`` неотличим от нажатия Enter: многострочная
+    вставка уходила в модель отдельным запросом на каждую строку.
+    """
+    _plain_paste()
+    first = console.input(prompt)
+    tail = _pasted_tail()
+    whole = first + "\n" + tail if tail else first
+    whole = PASTE_MARKERS.sub("", whole)
+    return "\n".join(line.rstrip("\r") for line in whole.split("\n")).strip()
+
+
+# Обрамление «скобочной вставки». Программа её отключает, но терминал может
+# прислать обрамление и без спроса — тогда оно попадёт в текст сообщения.
+PASTE_MARKERS = re.compile(r"\x1b\[20[01]~")
+
+# Сколько десятых долей секунды ждать продолжения вставки, прежде чем считать
+# её законченной. Ожидание обязательно: входной буфер терминала меньше длинной
+# вставки, поэтому её хвост дописывается только после того, как буфер
+# освободится — то есть уже после первого чтения.
+PASTE_IDLE_TENTHS = 1
+
+
+def _plain_paste() -> None:
+    """Отключить «скобочную вставку»: libedit на macOS её не понимает.
+
+    Терминал обрамляет вставку управляющими последовательностями, а libedit
+    съедает только их начало и оставляет в строке хвосты «200~» и «201~».
+    """
+    if sys.stdout.isatty():
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
+
+
+def _pasted_tail() -> str:
+    """Остаток вставки, пришедший тем же залпом, что и первая строка.
+
+    Читать его обычным способом нельзя: в каноническом режиме терминал
+    придерживает незавершённую строку до Enter, и она не видна ни ``select``,
+    ни ``read``. Поэтому режим на мгновение снимается — тогда всё, что уже
+    лежит во входной очереди, читается сразу.
+
+    Успеть набрать это вручную за время между Enter и чтением человек не может,
+    так что остаток — всегда вставка.
+    """
+    if not sys.stdin.isatty():
+        return ""
+    fd = sys.stdin.fileno()
+    try:
+        saved = termios.tcgetattr(fd)
+    except termios.error:
+        return ""
+
+    raw = termios.tcgetattr(fd)
+    raw[3] &= ~termios.ICANON
+    raw[6][termios.VMIN] = 0
+    raw[6][termios.VTIME] = PASTE_IDLE_TENTHS
+    chunks = []
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, raw)
+        while True:
+            data = os.read(fd, 4096)
+            if not data:
+                break
+            chunks.append(data)
+    except OSError:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, saved)
+    return b"".join(chunks).decode("utf-8", "replace")
 
 
 def fmt(number: int) -> str:
@@ -462,14 +542,66 @@ def warning_panel(text: str) -> RenderableType:
     return info_panel("[yellow]{}[/]".format(text), title="⚠ Внимание", style="yellow")
 
 
-HELP_TEXT = (
-    "[bold]/help[/]                — эта справка\n"
-    "[bold]/history[/]             — показать всю переписку целиком\n"
-    "[bold]/stats[/]               — подробная статистика по токенам\n"
-    "[bold]/change_llm_params[/]   — показать или изменить параметры генерации\n"
-    "[bold]/reset_llm_params[/]    — вернуть параметры к значениям по умолчанию\n"
-    "[bold]/new[/]                 — начать диалог заново (история очищается)\n"
-    "[bold]/exit[/]                — выход (также Ctrl+D)\n\n"
-    "[dim]Пример: /change_llm_params max_tokens=200 temperature=0.3[/]\n"
-    "[dim]Любой другой текст отправляется в модель вместе со всей историей диалога.[/]"
-)
+COMMANDS: List[tuple] = [
+    ("/help", "эта справка"),
+    ("/history", "показать всю переписку целиком"),
+    ("/stats", "подробная статистика по токенам"),
+    ("/change_llm_params", "изменить параметры генерации; без аргументов — "
+                           "таблица с текущими значениями"),
+    ("/reset_llm_params", "вернуть параметры к значениям по умолчанию"),
+    ("/new", "начать диалог заново (история очищается)"),
+    ("/exit", "выход (также Ctrl+D)"),
+]
+
+COMBINE_HINTS: List[tuple] = [
+    ("/change_llm_params max_tokens=200 temperature=0.3", "несколько параметров сразу, через пробел"),
+    ("/change_llm_params stop=Вопрос:|Ответ:", "несколько стоп-строк, через |"),
+    ('/change_llm_params stop="Вопрос пользователя:"', "значение с пробелами — в кавычках"),
+    ("/change_llm_params reset", "то же, что /reset_llm_params"),
+]
+
+
+def help_panel() -> RenderableType:
+    """Справка по командам и параметрам генерации с примерами записи."""
+    return Panel(
+        Group(_commands_table(), _params_table(), _combine_table(),
+              Text.from_markup(
+                  "\n[dim]Любой другой текст отправляется в модель "
+                  "вместе со всей историей диалога.[/]")),
+        title="Команды", title_align="left",
+        border_style="bright_blue", box=box.ROUNDED, padding=(0, 1))
+
+
+def _commands_table() -> Table:
+    table = _help_table()
+    table.add_column("Команда", style="bold", no_wrap=True)
+    table.add_column("Действие")
+    for name, description in COMMANDS:
+        table.add_row(name, Text(description, style="dim"))
+    return table
+
+
+def _params_table() -> Table:
+    """Параметры перечисляются по их же описаниям в коде, чтобы не разъезжались."""
+    table = _help_table(title="Параметры генерации — задаются как имя=значение")
+    table.add_column("Как записать", style="cyan", no_wrap=True)
+    table.add_column("Что делает")
+    table.add_column("Допустимо", style="italic")
+    for spec in SPECS.values():
+        table.add_row(spec.sample, Text(spec.description, style="dim"),
+                      Text(spec.limits, style="dim"))
+    return table
+
+
+def _combine_table() -> Table:
+    table = _help_table(title="Как комбинировать")
+    table.add_column("Пример", style="cyan", no_wrap=True)
+    table.add_column("Что получится")
+    for example, meaning in COMBINE_HINTS:
+        table.add_row(example, Text(meaning, style="dim"))
+    return table
+
+
+def _help_table(title: Optional[str] = None) -> Table:
+    return Table(box=box.SIMPLE_HEAVY, pad_edge=False, expand=True,
+                 title=title, title_justify="left", title_style="bold")

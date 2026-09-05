@@ -122,28 +122,40 @@ class ParamSpec:
     parse: Callable[[str], Any]
     description: str
     examples: List[str]
+    # Допустимые значения одной строкой — для справки и панели параметров.
+    limits: str = ""
+
+    @property
+    def sample(self) -> str:
+        """Первый пример без пояснения — короткая запись вида имя=значение."""
+        return self.examples[0].split(" — ")[0]
 
 
 SPECS: Dict[str, ParamSpec] = {
     spec.name: spec for spec in (
         ParamSpec("max_tokens", _int_in(1, 32000),
                   "предел длины ответа; на нём генерация обрывается",
-                  ["max_tokens=200", "max_tokens=4096"]),
+                  ["max_tokens=200", "max_tokens=4096"],
+                  limits="целое от 1 до 32000"),
         ParamSpec("temperature", _float_in(0.0, 2.0),
                   "случайность: ниже — предсказуемее, выше — разнообразнее",
-                  ["temperature=0", "temperature=0.7", "temperature=1.5"]),
+                  ["temperature=0", "temperature=0.7", "temperature=1.5"],
+                  limits="от 0 до 2"),
         ParamSpec("top_p", _float_in(0.0, 1.0),
                   "доля самых вероятных продолжений, из которых идёт выбор",
-                  ["top_p=0.1 — почти без разброса", "top_p=1 — без отсечения"]),
+                  ["top_p=0.1 — почти без разброса", "top_p=1 — без отсечения"],
+                  limits="от 0 до 1"),
         ParamSpec("stop", _stop_list,
                   "строки, на которых генерация обрывается",
                   ["stop=###КОНЕЦ###", "stop=Вопрос:|Ответ:",
-                   "stop=\\n\\n — оборвать на пустой строке", "stop=none — снять"]),
+                   "stop=\\n\\n — оборвать на пустой строке", "stop=none — снять"],
+                  limits="до четырёх строк через |, none — снять"),
         ParamSpec("response_format", _response_format,
                   "режим вывода на стороне провайдера",
                   ["response_format=json_object — только валидный JSON",
                    "response_format=text — обычный текст",
-                   "response_format=none — не передавать параметр"]),
+                   "response_format=none — не передавать параметр"],
+                  limits="json_object, text или none"),
     )
 }
 

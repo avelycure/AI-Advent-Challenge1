@@ -25,6 +25,8 @@ class ModelInfo:
     label: str
     context_window: int
     max_output: int
+    # Поля тела запроса, которые нужны именно этой модели.
+    extra_body: Dict[str, object] = field(default_factory=dict)
 
     @property
     def output_reserve(self) -> int:
@@ -75,6 +77,8 @@ class ProviderInfo:
     extra_field: Optional[ExtraField] = None
     model_uri_template: Optional[str] = None
     oauth: Optional[OAuthInfo] = None
+    # Поля тела запроса, которые понимает только этот провайдер.
+    extra_body: Dict[str, object] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -86,6 +90,15 @@ class ProviderInfo:
         if self.model_uri_template and extra:
             return self.model_uri_template.format(extra=extra, model=model.id)
         return model.id
+
+    def extra_body_for(self, model_ref: str) -> Dict[str, object]:
+        """Служебные поля запроса для конкретной модели поверх общих для провайдера."""
+        body = dict(self.extra_body)
+        for model in self.models:
+            if model.id == model_ref or model_ref.endswith("/" + model.id):
+                body.update(model.extra_body)
+                break
+        return body
 
 
 PROVIDERS: Dict[str, ProviderInfo] = {
@@ -190,6 +203,41 @@ PROVIDERS: Dict[str, ProviderInfo] = {
                "«перегружена». По проверке MiniMax отвечает стабильнее и быстрее, "
                "GLM — рассуждающая модель, ей нужен max_tokens побольше."],
     ),
+    "groq": ProviderInfo(
+        key="groq",
+        name="Groq (бесплатный тариф)",
+        base_url="https://api.groq.com/openai/v1",
+        api_key_env="GROQ_API_KEY",
+        token_url="https://console.groq.com/keys",
+        accent="bright_yellow",
+        key_hint="ключ начинается с gsk_",
+        key_files=["~/.groq-key", "~/.config/llm-chat/groq.key"],
+        # Размеры окон взяты из ответа самого /v1/models, а не из документации:
+        # у qwen3.8 там 131 042, а не круглые 131 072.
+        # Все модели Groq рассуждают перед ответом, и рассуждение тратит тот же
+        # max_tokens, что и сам ответ. Без ограничения короткий запрос возвращает
+        # пустой текст: лимит уходит на размышление. Qwen позволяет отключить его
+        # совсем, GPT-OSS принимает только low, medium и high, а системы compound
+        # не принимают поле вовсе.
+        models=[
+            ModelInfo("qwen/qwen3.8-27b", "Qwen 3.8 27B — самая свежая", 131_042, 16_384,
+                      extra_body={"reasoning_effort": "none"}),
+            ModelInfo("qwen/qwen3.6-27b", "Qwen 3.6 27B — предыдущая версия", 131_072, 16_384,
+                      extra_body={"reasoning_effort": "none"}),
+            ModelInfo("openai/gpt-oss-120b", "GPT-OSS 120B — самая крупная", 131_072, 65_536,
+                      extra_body={"reasoning_effort": "low"}),
+            ModelInfo("openai/gpt-oss-20b", "GPT-OSS 20B — самая быстрая, около 1000 токенов в секунду",
+                      131_072, 65_536, extra_body={"reasoning_effort": "low"}),
+            ModelInfo("groq/compound", "Compound — модель с веб-поиском и запуском кода", 131_072, 8_192),
+            ModelInfo("groq/compound-mini", "Compound Mini — облегчённая", 131_072, 8_192),
+        ],
+        notes=["Бесплатный тариф выдаётся без привязки карты. По заголовкам ответа "
+               "лимиты такие: 1000 запросов в сутки и 8000 токенов в минуту.",
+               "Лимит в 8000 токенов в минуту тратится и на запрос, и на ответ, "
+               "поэтому длинный диалог упрётся в него раньше, чем в размер окна.",
+               "Llama 3.1 и 3.3 из документации обычному ключу не выдаются: Groq "
+               "перевёл их в тариф Enterprise."],
+    ),
     "gemini": ProviderInfo(
         key="gemini",
         name="Google Gemini",
@@ -240,4 +288,4 @@ PROVIDERS: Dict[str, ProviderInfo] = {
 }
 
 PROVIDER_ORDER: List[str] = ["deepseek", "openai", "yandex", "gigachat",
-                             "grok", "openrouter", "gemini"]
+                             "grok", "openrouter", "groq", "gemini"]
