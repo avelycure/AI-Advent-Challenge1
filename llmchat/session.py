@@ -32,6 +32,7 @@ class Message:
     completion_tokens: int = 0
     reasoning_tokens: int = 0
     cost: Optional[float] = None
+    cost_currency: str = "USD"
 
 
 @dataclass
@@ -53,7 +54,8 @@ class Session:
     total_completion_tokens: int = 0
     total_reasoning_tokens: int = 0
     total_seconds: float = 0.0
-    total_cost: float = 0.0
+    # По каждой валюте отдельно: рубли с долларами не складываются.
+    total_costs: Dict[str, float] = field(default_factory=dict)
     # Запросы к моделям, цена которых не задана: без этого счётчика итоговая
     # сумма выглядела бы полной, хотя часть расхода в неё не вошла.
     unpriced_requests: int = 0
@@ -123,6 +125,7 @@ class Session:
         answer.completion_tokens = completion.completion_tokens
         answer.reasoning_tokens = completion.reasoning_tokens
         answer.cost = self.cost_of(completion)
+        answer.cost_currency = self.model.currency
 
         self.record_side_request(completion)
         self.exact_context = completion.prompt_tokens + completion.completion_tokens
@@ -140,7 +143,8 @@ class Session:
         if cost is None:
             self.unpriced_requests += 1
         else:
-            self.total_cost += cost
+            currency = self.model.currency
+            self.total_costs[currency] = self.total_costs.get(currency, 0.0) + cost
 
     def cost_of(self, completion) -> Optional[float]:
         """Стоимость запроса по цене той модели, что отвечает сейчас."""

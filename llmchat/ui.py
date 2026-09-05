@@ -121,29 +121,39 @@ def format_seconds(seconds: float) -> str:
     return "{:.0f} мин {:02.0f} с".format(seconds // 60, seconds % 60)
 
 
-def format_cost(usd: Optional[float]) -> str:
-    """Цена в долларах. Прочерк означает, что цена модели не задана."""
-    if usd is None:
+CURRENCY_SIGNS = {"USD": "$", "RUB": "₽"}
+
+
+def format_cost(amount: Optional[float], currency: str = "USD") -> str:
+    """Цена в валюте прайса. Прочерк означает, что цена модели не задана."""
+    if amount is None:
         return "—"
-    if usd == 0:
+    if amount == 0:
         return "бесплатно"
-    if usd < 0.000001:
+    sign = CURRENCY_SIGNS.get(currency, currency + " ")
+    if amount < 0.000001:
         # Иначе округление до шести знаков даёт «$0.» и выглядит как ошибка.
-        return "<$0.000001"
-    if usd < 0.001:
-        return "${}".format("{:.6f}".format(usd).rstrip("0"))
-    if usd < 1:
-        return "${:.4f}".format(usd)
-    return "${:.2f}".format(usd)
+        return "<{}0.000001".format(sign)
+    if amount < 0.001:
+        return "{}{}".format(sign, "{:.6f}".format(amount).rstrip("0"))
+    if amount < 1:
+        # Хвостовые нули срезаются, но два знака остаются: иначе цена прайса
+        # выглядит рвано — «$0.7500» рядом с «$4.50».
+        digits = "{:.4f}".format(amount).rstrip("0")
+        whole, _, fraction = digits.partition(".")
+        return "{}{}.{}".format(sign, whole, fraction.ljust(2, "0"))
+    return "{}{:.2f}".format(sign, amount)
 
 
 def session_cost_label(session: Session) -> str:
     """Итог по сессии. «≥» означает, что часть запросов посчитать не удалось."""
     if session.requests == 0:
         return "—"
-    if session.unpriced_requests and not session.total_cost:
+    parts = [format_cost(value, currency)
+             for currency, value in sorted(session.total_costs.items())]
+    if not parts:
         return "—"
-    label = format_cost(session.total_cost)
+    label = " + ".join(parts)
     return "≥ " + label if session.unpriced_requests else label
 
 
@@ -516,7 +526,7 @@ def answer_metrics(message: Message) -> Optional[Text]:
         line.append(" · ", style="grey35")
         line.append("размышление {}".format(fmt(message.reasoning_tokens)), style="yellow")
     line.append(" · ", style="grey35")
-    line.append(format_cost(message.cost), style="magenta")
+    line.append(format_cost(message.cost, message.cost_currency), style="magenta")
     return line
 
 

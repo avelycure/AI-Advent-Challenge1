@@ -181,6 +181,8 @@ def stats_panel(session: Session) -> RenderableType:
     table.add_row("Время в запросах", format_seconds(session.total_seconds))
     table.add_row("В среднем на запрос", format_seconds(session.avg_seconds))
     table.add_row("Цена модели за 1M", price_label(session.provider, session.model))
+    if session.model.price_note:
+        table.add_row("Оговорка к цене", session.model.price_note)
     table.add_row("Стоимость сессии", session_cost_label(session))
     if session.unpriced_requests:
         table.add_row("Не посчитано", "{} {} — цена модели не задана".format(
@@ -197,8 +199,8 @@ def price_label(provider, model) -> str:
         return "бесплатный тариф"
     if not model.priced:
         return "не задана"
-    return "{} вход · {} выход".format(format_cost(model.input_price),
-                                       format_cost(model.output_price))
+    return "{} вход · {} выход".format(format_cost(model.input_price, model.currency),
+                                       format_cost(model.output_price, model.currency))
 
 
 def params_panel(session: Session) -> RenderableType:

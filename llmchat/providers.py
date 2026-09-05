@@ -32,6 +32,11 @@ class ModelInfo:
     input_price: Optional[float] = None
     output_price: Optional[float] = None
     cached_price: Optional[float] = None
+    # Валюта прайса. Складывать рубли с долларами нельзя, поэтому итог по
+    # сессии считается по каждой валюте отдельно.
+    currency: str = "USD"
+    # Оговорка к цене: второй тариф, срок действия, бесплатный лимит.
+    price_note: str = ""
 
     @property
     def output_reserve(self) -> int:
@@ -168,8 +173,14 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         key_hint="ключ начинается с sk-",
         key_files=["~/.deepseek-key", "~/.llm-test-key", "~/.config/llm-chat/deepseek.key"],
         models=[
-            ModelInfo("deepseek-chat", "DeepSeek Chat — универсальная модель", 64_000, 8_192),
-            ModelInfo("deepseek-reasoner", "DeepSeek Reasoner — с цепочкой рассуждений", 64_000, 8_192),
+            # Цена намеренно не задана: в документации DeepSeek этих имён больше
+            # нет — прайс published только для deepseek-v4-flash и -v4-pro,
+            # и переносить их цену на старые псевдонимы было бы выдумкой.
+            ModelInfo("deepseek-chat", "DeepSeek Chat — универсальная модель", 64_000, 8_192,
+                      price_note="в документации этого имени больше нет, цена неизвестна"),
+            ModelInfo("deepseek-reasoner", "DeepSeek Reasoner — с цепочкой рассуждений",
+                      64_000, 8_192,
+                      price_note="в документации этого имени больше нет, цена неизвестна"),
         ],
     ),
     "yandex": ProviderInfo(
@@ -192,8 +203,13 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         ),
         model_uri_template="gpt://{extra}/{model}/latest",
         models=[
-            ModelInfo("yandexgpt-lite", "YandexGPT Lite — быстрая и дешёвая", 32_000, 2_000),
-            ModelInfo("yandexgpt", "YandexGPT Pro — сильнее и дороже", 32_000, 2_000),
+            ModelInfo("yandexgpt-lite", "YandexGPT Lite — быстрая и дешёвая", 32_000, 2_000,
+                      input_price=200, output_price=200, cached_price=200, currency="RUB",
+                      price_note="0,2 ₽ за 1000 токенов, включая НДС"),
+            ModelInfo("yandexgpt", "YandexGPT Pro — сильнее и дороже", 32_000, 2_000,
+                      input_price=800, output_price=800, cached_price=800, currency="RUB",
+                      price_note="0,8 ₽ за 1000 токенов (Pro 5.1, его и даёт /latest), "
+                                 "включая НДС"),
         ],
         notes=["Ключ и каталог берутся в консоли Yandex Cloud: нужен сервисный аккаунт "
                "с ролью ai.languageModels.user."],
@@ -210,9 +226,15 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         # Названия взяты из прав самого ключа (эндпоинт /v1/api-key), а не из
         # документации: у разных аккаунтов набор моделей отличается.
         models=[
-            ModelInfo("grok-4.3", "Grok 4.3 — самая дешёвая из доступных", 131_072, 8_192),
-            ModelInfo("grok-4.5", "Grok 4.5 — сбалансированная", 131_072, 8_192),
-            ModelInfo("grok-4.6", "Grok 4.6 — самая свежая", 131_072, 8_192),
+            ModelInfo("grok-4.3", "Grok 4.3 — самая дешёвая из доступных", 131_072, 8_192,
+                      input_price=1.25, output_price=2.50, cached_price=0.20,
+                      price_note="при промпте от 200 000 токенов тариф вдвое выше"),
+            ModelInfo("grok-4.5", "Grok 4.5 — сбалансированная", 131_072, 8_192,
+                      input_price=2.00, output_price=6.00, cached_price=0.30,
+                      price_note="при промпте от 200 000 токенов тариф вдвое выше"),
+            ModelInfo("grok-4.6", "Grok 4.6 — самая свежая", 131_072, 8_192,
+                      input_price=2.00, output_price=6.00, cached_price=0.50,
+                      price_note="при промпте от 200 000 токенов тариф вдвое выше"),
         ],
         notes=["Бесплатного тарифа у xAI нет: без купленных кредитов API отвечает "
                "отказом на любой запрос, включая список моделей.",
@@ -291,10 +313,17 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         key_hint="ключ из Google AI Studio, начинается с AIza",
         key_files=["~/.gemini-key", "~/.config/llm-chat/gemini.key"],
         models=[
-            ModelInfo("gemini-3.7-flash", "Gemini 3.7 Flash — самая свежая", 1_048_576, 65_536),
-            ModelInfo("gemini-3.5-flash", "Gemini 3.5 Flash", 1_048_576, 65_536),
+            ModelInfo("gemini-3.7-flash", "Gemini 3.7 Flash — самая свежая", 1_048_576, 65_536,
+                      input_price=0.75, output_price=3.75,
+                      price_note="акционная цена до 31.12.2026; с 1 января 2027 — "
+                                 "$1.50 вход и $7.50 выход"),
+            ModelInfo("gemini-3.5-flash", "Gemini 3.5 Flash", 1_048_576, 65_536,
+                      input_price=1.50, output_price=9.00,
+                      price_note="платный тариф; у ключа может быть бесплатный лимит"),
             ModelInfo("gemini-2.5-flash", "Gemini 2.5 Flash — проверенная временем",
-                      1_048_576, 65_536),
+                      1_048_576, 65_536,
+                      input_price=0.30, output_price=2.50,
+                      price_note="цена для текста; аудио на входе дороже — $1.00"),
         ],
         notes=["У Google AI Studio есть бесплатный тариф с ограничением по числу "
                "запросов в сутки; карта для получения ключа не нужна.",
@@ -317,9 +346,17 @@ PROVIDERS: Dict[str, ProviderInfo] = {
             scope="GIGACHAT_API_PERS",  # тариф для физических лиц
         ),
         models=[
-            ModelInfo("GigaChat-2", "GigaChat 2 Lite — быстрая, входит в бесплатный лимит", 128_000, 4_096),
-            ModelInfo("GigaChat-2-Pro", "GigaChat 2 Pro — для сложных задач", 128_000, 4_096),
-            ModelInfo("GigaChat-2-Max", "GigaChat 2 Max — самая мощная", 128_000, 4_096),
+            ModelInfo("GigaChat-2", "GigaChat 2 Lite — быстрая, входит в бесплатный лимит",
+                      128_000, 4_096,
+                      input_price=65, output_price=65, currency="RUB",
+                      price_note="0,065 ₽ за 1000 токенов — выведено из цены пакета; "
+                                 "отдельного прайса за токен Сбер не публикует"),
+            ModelInfo("GigaChat-2-Pro", "GigaChat 2 Pro — для сложных задач", 128_000, 4_096,
+                      input_price=500, output_price=500, currency="RUB",
+                      price_note="0,5 ₽ за 1000 токенов — выведено из цены пакета"),
+            ModelInfo("GigaChat-2-Max", "GigaChat 2 Max — самая мощная", 128_000, 4_096,
+                      input_price=650, output_price=650, currency="RUB",
+                      price_note="0,65 ₽ за 1000 токенов — выведено из цены пакета"),
         ],
         notes=["Ключ авторизации меняется на access-токен по OAuth; токен живёт 30 минут "
                "и обновляется программой автоматически.",
