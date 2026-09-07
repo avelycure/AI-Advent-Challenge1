@@ -1,229 +1,144 @@
-"""Состояние диалога: история, тема и учёт токенов."""
+"""Состояние экрана поверх агента.
+
+Диалог, счётчики и параметры живут в агенте — здесь только то, что относится
+к показу: тема в шапке и удобные для отрисовки имена. Класс намеренно оставлен
+на месте: интерфейс обращался к нему десятками мест, и оборачивать агента
+дешевле, чем переписывать каждую панель.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .params import GenerationParams
-from .providers import ModelInfo, ProviderInfo, request_cost
-from .tokens import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
-
-SYSTEM_PROMPT = (
-    "Ты — полезный ассистент, который общается с пользователем в терминале. "
-    "Отвечай на языке пользователя, по существу и без лишней воды. "
-    "Форматирование Markdown допустимо: списки, заголовки, блоки кода."
-)
+from llmagent import Agent, GenerationParams, Message
+from llmagent.transport import ModelInfo, ProviderInfo
 
 DEFAULT_TOPIC = "Новый диалог"
 
-
-@dataclass
-class Message:
-    role: str  # "user" | "assistant"
-    content: str
-    # Чей это ответ. Подпись хранится в самом сообщении, а не берётся из сессии:
-    # иначе после смены модели прежние ответы переклеились бы её именем.
-    model: str = ""
-    accent: str = ""
-    # Что стоил этот ответ. Метрики держатся при сообщении, а не в сессии,
-    # чтобы после смены модели можно было сравнить ответы между собой.
-    elapsed: float = 0.0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    reasoning_tokens: int = 0
-    cost: Optional[float] = None
-    cost_currency: str = "USD"
+__all__ = ["Session", "Message", "DEFAULT_TOPIC"]
 
 
-@dataclass
 class Session:
-    provider: ProviderInfo
-    model: ModelInfo
-    # Строка, которая уходит в поле model запроса. У Яндекса это длинный URI
-    # gpt://<каталог>/<модель>/latest, поэтому на экране показываем model.id.
-    model_ref: str = ""
-    system_prompt: str = SYSTEM_PROMPT
-    # Параметры генерации, переключаемые командой прямо во время диалога.
-    params: GenerationParams = field(default_factory=GenerationParams)
-    messages: List[Message] = field(default_factory=list)
-    topic: str = DEFAULT_TOPIC
+    """Обёртка агента для терминального интерфейса."""
 
-    exchanges: int = 0
-    requests: int = 0
-    total_prompt_tokens: int = 0
-    total_completion_tokens: int = 0
-    total_reasoning_tokens: int = 0
-    total_seconds: float = 0.0
-    # По каждой валюте отдельно: рубли с долларами не складываются.
-    total_costs: Dict[str, float] = field(default_factory=dict)
-    # Запросы к моделям, цена которых не задана: без этого счётчика итоговая
-    # сумма выглядела бы полной, хотя часть расхода в неё не вошла.
-    unpriced_requests: int = 0
+    def __init__(self, agent: Agent, topic: str = DEFAULT_TOPIC) -> None:
+        self.agent = agent
+        self.topic = topic
 
-    # Точный размер диалога по данным API и число сообщений, которое он покрывает.
-    exact_context: int = 0
-    exact_upto: int = 0
+    # --- конфиг агента, как его видит экран -----------------------------
+    @property
+    def provider(self) -> ProviderInfo:
+        return self.agent.config.provider_info
 
-    def __post_init__(self) -> None:
-        if not self.model_ref:
-            self.model_ref = self.model.id
+    @property
+    def model(self) -> ModelInfo:
+        return self.agent.config.model_info
 
-    # --- история -------------------------------------------------------
-    def api_messages(self) -> List[Dict[str, str]]:
-        return self.api_messages_upto(len(self.messages) - 1)
+    @property
+    def model_ref(self) -> str:
+        return self.agent.model_ref
 
-    def api_messages_upto(self, index: int) -> List[Dict[str, str]]:
-        """История по указанное сообщение включительно — для повторного запроса."""
-        payload = [{"role": "system", "content": self.system_prompt}]
-        payload += [{"role": m.role, "content": m.content}
-                    for m in keep_last_answer(self.messages[:index + 1])]
-        return payload
+    @property
+    def params(self) -> GenerationParams:
+        return self.agent.config.generation
 
-    def last_user_index(self) -> int:
-        for index in range(len(self.messages) - 1, -1, -1):
-            if self.messages[index].role == "user":
-                return index
-        return -1
+    @params.setter
+    def params(self, value: GenerationParams) -> None:
+        self.agent.reconfigure(generation=value)
+
+    def switch_to(self, provider: ProviderInfo, model: ModelInfo,
+                  api_extra: Optional[str] = None) -> None:
+        """Сменить модель, сохранив историю, тему и общий счёт токенов."""
+        self.agent.reconfigure(provider=provider.key, model=model.id, api_extra=api_extra)
+
+    # --- история --------------------------------------------------------
+    @property
+    def messages(self) -> List[Message]:
+        return self.agent.conversation.messages
 
     def add_user(self, content: str) -> None:
-        self.messages.append(Message("user", content))
-
-    def add_assistant(self, content: str) -> None:
-        self.messages.append(Message("assistant", content,
-                                     model=self.model.id, accent=self.provider.accent))
-        self.exchanges += 1
-
-    def switch_to(self, provider: ProviderInfo, model: ModelInfo, model_ref: str) -> None:
-        """Сменить модель, сохранив историю, тему и общий счёт токенов."""
-        self.provider = provider
-        self.model = model
-        self.model_ref = model_ref
-        # Точный размер контекста измерен токенизатором прежней модели и после
-        # смены неверен, поэтому история снова оценивается локально.
-        self.exact_context = 0
-        self.exact_upto = 0
+        self.agent.conversation.add_user(content)
 
     def drop_last_user(self) -> None:
-        """Убрать неотвеченное сообщение, чтобы история не осталась битой."""
-        if self.messages and self.messages[-1].role == "user":
-            self.messages.pop()
+        self.agent.conversation.drop_last_user()
+
+    def last_user_index(self) -> int:
+        return self.agent.conversation.last_user_index()
 
     def reset(self) -> None:
-        self.messages.clear()
+        self.agent.reset()
         self.topic = DEFAULT_TOPIC
-        self.exchanges = 0
-        self.exact_context = 0
-        self.exact_upto = 0
-
-    # --- учёт токенов --------------------------------------------------
-    def record_answer(self, completion) -> None:
-        """Записать ответ диалога вместе с его метриками и стоимостью."""
-        self.add_assistant(completion.text)
-        answer = self.messages[-1]
-        answer.elapsed = completion.elapsed
-        answer.prompt_tokens = completion.prompt_tokens
-        answer.completion_tokens = completion.completion_tokens
-        answer.reasoning_tokens = completion.reasoning_tokens
-        answer.cost = self.cost_of(completion)
-        answer.cost_currency = self.model.currency
-
-        self.record_side_request(completion)
-        self.exact_context = completion.prompt_tokens + completion.completion_tokens
-        self.exact_upto = len(self.messages)
-
-    def record_side_request(self, completion) -> None:
-        """Служебный запрос (например, за темой): только в общий счёт."""
-        self.total_prompt_tokens += completion.prompt_tokens
-        self.total_completion_tokens += completion.completion_tokens
-        self.total_reasoning_tokens += completion.reasoning_tokens
-        self.total_seconds += completion.elapsed
-        self.requests += 1
-
-        cost = self.cost_of(completion)
-        if cost is None:
-            self.unpriced_requests += 1
-        else:
-            currency = self.model.currency
-            self.total_costs[currency] = self.total_costs.get(currency, 0.0) + cost
-
-    def cost_of(self, completion) -> Optional[float]:
-        """Стоимость запроса по цене той модели, что отвечает сейчас."""
-        return request_cost(self.provider, self.model, completion.prompt_tokens,
-                            completion.completion_tokens, completion.cached_tokens)
 
     @property
-    def avg_seconds(self) -> float:
-        return self.total_seconds / self.requests if self.requests else 0.0
+    def exchanges(self) -> int:
+        return self.agent.conversation.exchanges
 
-    @property
-    def total_tokens(self) -> int:
-        return self.total_prompt_tokens + self.total_completion_tokens
-
-    def context_used(self) -> int:
-        """Размер диалога: точные данные API плюс оценка неотправленного хвоста."""
-        if self.exact_upto == 0:
-            return count_message_tokens(self.api_messages())
-        pending = self.messages[self.exact_upto:]
-        return self.exact_context + sum(
-            count_text_tokens(m.content) + MESSAGE_OVERHEAD for m in pending
-        )
-
+    # --- окно контекста --------------------------------------------------
     @property
     def context_limit(self) -> int:
-        return self.model.context_window
+        return self.agent.context_limit
 
     @property
     def output_reserve(self) -> int:
-        """Сколько токенов оставлено под ответ с учётом заданных параметров."""
-        return self.params.effective_max_tokens(self.model.output_reserve)
+        return self.agent.output_reserve
 
     @property
     def input_budget(self) -> int:
-        """Сколько контекста реально доступно под историю с учётом места на ответ.
+        return self.agent.input_budget
 
-        Уменьшённый max_tokens освобождает место под историю — поэтому бюджет
-        считается по действующему значению, а не по резерву модели.
-        """
-        return max(1, self.model.context_window - self.output_reserve)
+    def context_used(self) -> int:
+        return self.agent.context_used()
 
     def free_tokens(self) -> int:
-        return max(0, self.input_budget - self.context_used())
+        return self.agent.free_tokens()
 
     def fill_ratio(self) -> float:
-        """Давление на бюджет истории: 1.0 — новые сообщения уже не примутся."""
-        return min(1.0, self.context_used() / self.input_budget)
+        return self.agent.fill_ratio()
 
     def window_ratio(self) -> float:
-        """Доля физического окна модели, занятая диалогом."""
-        return min(1.0, self.context_used() / self.context_limit)
+        return self.agent.window_ratio()
 
     def avg_exchange_tokens(self) -> int:
-        """Средний прирост контекста за один обмен «вопрос — ответ»."""
-        if self.exchanges == 0:
-            return 0
-        return max(1, round(self.context_used() / self.exchanges))
+        return self.agent.avg_exchange_tokens()
 
     def remaining_exchanges(self) -> int:
-        average = self.avg_exchange_tokens()
-        if average == 0:
-            return 0
-        return self.free_tokens() // average
+        return self.agent.remaining_exchanges()
 
     def is_full(self) -> bool:
-        return self.free_tokens() <= 0
+        return self.agent.is_full()
 
+    # --- расход ----------------------------------------------------------
+    @property
+    def requests(self) -> int:
+        return self.agent.usage.requests
 
-def keep_last_answer(messages: List[Message]) -> List[Message]:
-    """Из подряд идущих ответов оставить последний.
+    @property
+    def total_prompt_tokens(self) -> int:
+        return self.agent.usage.prompt_tokens
 
-    Ответы копятся, когда один вопрос переспрашивают на разных моделях: в истории
-    их видно все, но в запрос уходит только свежий — иначе модель получила бы
-    несколько ответов на один свой вопрос.
-    """
-    kept: List[Message] = []
-    for message in messages:
-        if kept and message.role == "assistant" and kept[-1].role == "assistant":
-            kept[-1] = message
-            continue
-        kept.append(message)
-    return kept
+    @property
+    def total_completion_tokens(self) -> int:
+        return self.agent.usage.completion_tokens
+
+    @property
+    def total_reasoning_tokens(self) -> int:
+        return self.agent.usage.reasoning_tokens
+
+    @property
+    def total_tokens(self) -> int:
+        return self.agent.usage.total_tokens
+
+    @property
+    def total_seconds(self) -> float:
+        return self.agent.usage.seconds
+
+    @property
+    def avg_seconds(self) -> float:
+        return self.agent.usage.avg_seconds
+
+    @property
+    def total_costs(self) -> Dict[str, float]:
+        return self.agent.usage.costs
+
+    @property
+    def unpriced_requests(self) -> int:
+        return self.agent.usage.unpriced_requests

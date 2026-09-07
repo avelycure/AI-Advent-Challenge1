@@ -4,10 +4,14 @@
 другой модели и сравнить ответы, не выходя из сессии. Ключи провайдеров
 запоминаются на время работы программы, поэтому возврат к уже опробованному
 провайдеру ничего не спрашивает.
+
+Спрашивать реквизиты — работа интерфейса, а не агента: агент их только
+принимает готовыми в конфиге. Поэтому здесь остался ровно диалог с человеком,
+а собранное уходит в ``Agent.reconfigure``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 from rich.console import Console, Group, RenderableType
@@ -16,24 +20,25 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .client import LLMError, make_client
-from .providers import PROVIDER_ORDER, PROVIDERS, ModelInfo, ProviderInfo
+from llmagent import Agent, AgentConfig, Credentials, LLMError
+from llmagent.transport import PROVIDER_ORDER, PROVIDERS, ModelInfo, ProviderInfo
+
 from .session import Session
 from .ui import ask_extra_field, ask_token, error_panel, fmt, info_panel, plural
 
 
-def handle_command(console: Console, pool: "ClientPool", session: Session,
+def handle_command(console: Console, store: "CredentialStore", session: Session,
                    argument: str) -> RenderableType:
     """Обработать /change_model и вернуть панель с результатом."""
     if not argument.strip():
-        return catalog_panel(session, pool)
+        return catalog_panel(session, store)
     choice, complaint = resolve(argument)
     if choice is None:
         return error_panel(complaint)
-    return switch(console, pool, session, choice)
+    return switch(console, store, session, choice)
 
 
-def catalog_panel(session: Session, pool: "ClientPool") -> RenderableType:
+def catalog_panel(session: Session, store: "CredentialStore") -> RenderableType:
     table = Table(box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False, expand=True)
     table.add_column("Провайдер", style="bold", no_wrap=True)
     table.add_column("Ключ", no_wrap=True)
@@ -42,7 +47,7 @@ def catalog_panel(session: Session, pool: "ClientPool") -> RenderableType:
     for provider, choices in grouped():
         table.add_row(
             Text(provider.name, style=provider.accent),
-            Text("готов", style="green") if pool.has(provider) else Text("спросит", style="dim"),
+            Text("готов", style="green") if store.has(provider) else Text("спросит", style="dim"),
             model_chips(choices, session),
         )
 
@@ -77,7 +82,7 @@ def resolve(argument: str) -> Tuple[Optional["Choice"], str]:
         argument.strip(), ", ".join(str(choice.number) for choice in found)))
 
 
-def switch(console: Console, pool: "ClientPool", session: Session,
+def switch(console: Console, store: "CredentialStore", session: Session,
            choice: "Choice") -> RenderableType:
     if choice.provider.key == session.provider.key and choice.model.id == session.model.id:
         return info_panel("Модель {} уже выбрана.".format(choice.model.id),
@@ -86,15 +91,15 @@ def switch(console: Console, pool: "ClientPool", session: Session,
     was = "{} · {}".format(session.provider.name, session.model.id)
     was_window = session.context_limit
     try:
-        ready = pool.ready_for(console, choice.provider)
+        credentials = store.ready_for(console, choice.provider)
     except LLMError as exc:
         return error_panel("Переключиться не удалось: {}\nМодель осталась прежней.".format(exc))
     except (KeyboardInterrupt, EOFError):
         return info_panel("Ввод прерван, модель осталась прежней.",
                           title="Отмена", style="yellow")
 
-    session.switch_to(choice.provider, choice.model,
-                      choice.provider.model_ref(choice.model, ready.extra))
+    session.agent.reconfigure(provider=choice.provider.key, model=choice.model.id,
+                              api_key=credentials.key, api_extra=credentials.extra)
     return switch_notice(session, was, was_window)
 
 
@@ -168,28 +173,30 @@ def catalog() -> List["Choice"]:
     return choices
 
 
-class ClientPool:
-    """Клиенты по провайдерам: реквизиты за сессию спрашиваются один раз."""
+class CredentialStore:
+    """Реквизиты провайдеров: за время работы программы спрашиваются один раз.
+
+    Хранит то, что ввёл человек, и ничего больше: клиенты и соединения — забота
+    агента, а один и тот же ключ он переиспользует через свой реестр.
+    """
 
     def __init__(self, demo: bool = False, ask_keys: bool = False) -> None:
         self.demo = demo
         self.ask_keys = ask_keys
-        self.current = None
-        self._ready: Dict[str, "Ready"] = {}
+        self._known: Dict[str, Credentials] = {}
 
     def has(self, provider: ProviderInfo) -> bool:
-        return provider.key in self._ready
+        return provider.key in self._known
 
     def ready_for(self, console: Console, provider: ProviderInfo,
-                  step: Optional[int] = None) -> "Ready":
-        """Клиент провайдера: готовый из кеша либо собранный после ввода реквизитов.
+                  step: Optional[int] = None) -> Credentials:
+        """Реквизиты провайдера: из памяти либо спрошенные и проверенные.
 
         ``step`` задаётся только на первоначальной настройке, где панели
         пронумерованы шагами; посреди диалога нумерации нет.
         """
-        if provider.key in self._ready:
-            self.current = self._ready[provider.key].client
-            return self._ready[provider.key]
+        if provider.key in self._known:
+            return self._known[provider.key]
 
         extra = None
         if provider.extra_field is not None:
@@ -199,37 +206,47 @@ class ClientPool:
             if step is not None:
                 step += 1
 
-        ready = Ready(client=self.connect(console, provider, step), extra=extra)
-        self._ready[provider.key] = ready
-        self.current = ready.client
-        return ready
+        credentials = self.connect(console, provider, extra, step)
+        self._known[provider.key] = credentials
+        return credentials
 
-    def connect(self, console: Console, provider: ProviderInfo, step: Optional[int]):
+    def connect(self, console: Console, provider: ProviderInfo, extra: Optional[str],
+                step: Optional[int]) -> Credentials:
         """Спрашивать ключ, пока он не подойдёт. Ctrl+C прерывает ввод."""
         while True:
             token = ask_token(
                 console, provider, step=step or 2, offer_saved=not self.ask_keys,
                 title=None if step else "{} · {}".format(provider.key_title, provider.name))
-            candidate = make_client(provider, token, self.demo)
             console.print()
             with console.status("[bold]Проверяю доступ…[/]", spinner="dots"):
                 try:
-                    candidate.validate_key()
+                    self.probe(provider, token, extra).validate_credentials()
                 except LLMError as exc:
                     console.print(error_panel(str(exc)))
                     console.print("[dim]Попробуйте ввести ключ ещё раз (Ctrl+C — отмена).[/]")
                     continue
             console.print(info_panel("[green]Доступ подтверждён.[/]",
                                      title="Готово", style="green"))
-            return candidate
+            return Credentials(token, extra, "введён вручную")
 
+    def probe(self, provider: ProviderInfo, token: str, extra: Optional[str]) -> Agent:
+        """Одноразовый агент для проверки ключа. Токенов не тратит."""
+        return Agent(self.config_for(provider, provider.default_model, token, extra))
 
-@dataclass
-class Ready:
-    """Всё, что нужно для запросов к провайдеру: клиент и его доп. реквизит."""
+    def config_for(self, provider: ProviderInfo, model: ModelInfo, key: str,
+                   extra: Optional[str], base: Optional[AgentConfig] = None) -> AgentConfig:
+        """Конфиг агента под выбранного провайдера с введёнными реквизитами.
 
-    client: object
-    extra: Optional[str] = None
+        Основание сохраняется целиком: политики и бюджет из файла не должны
+        пропадать оттого, что провайдера выбрали руками.
+        """
+        source = base if base is not None else AgentConfig()
+        transport = source.transport
+        if self.demo and not transport.demo:
+            transport = replace(transport, demo=True)
+        return source.with_changes(
+            provider=provider.key, model=model.id, api_key=key, api_extra=extra,
+            transport=transport)
 
 
 @dataclass(frozen=True)

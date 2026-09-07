@@ -32,11 +32,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from llmchat.app import setup
-from llmchat.client import LLMError, make_client
-from llmchat.providers import PROVIDERS
-from llmchat.secrets import find_sources
-from llmchat.strategies import (
+from llmagent import Agent, AgentError, HistoryConfig, LLMError, MissingCredentials
+from llmagent.strategies import (
     DIGIT_TASK,
     EXPERT_TASK_SUFFIX,
     EXTRACT_PROMPT,
@@ -49,7 +46,12 @@ from llmchat.strategies import (
     parse_extracted,
     parse_scores,
 )
+from llmagent.transport import PROVIDERS
+from llmchat.app import setup
 from llmchat.ui import fmt, make_console, plural
+
+# Опыт строит каждый запрос сам: история между способами всё бы перемешала.
+HISTORYLESS = HistoryConfig(enabled=False)
 
 # Задача требует перебора вариантов, и ответы получаются длинными. Лимит
 # щедрый намеренно: обрезанный ответ нечестно сравнивать с полным, а у
@@ -63,15 +65,19 @@ JUDGE_MAX_TOKENS = 120
 TEMPERATURE = 0.9
 
 
-def complete_with_retry(client, model_ref: str, messages: List[dict],
-                        max_tokens: int, temperature: float, attempts: int = 2):
-    """Один повтор при сбое: бесплатные модели изредка возвращают пустой ответ."""
-    last: Optional[LLMError] = None
+def complete_with_retry(agent: Agent, messages: List[dict], max_tokens: int,
+                        temperature: float, attempts: int = 2):
+    """Один повтор при сбое: бесплатные модели изредка возвращают пустой ответ.
+
+    Идёт через ``ask_messages``: расход опыта учитывается тем же счётчиком,
+    что и всё остальное, а история и политики агенту здесь не нужны.
+    """
+    last: Optional[Exception] = None
     for number in range(attempts):
         try:
-            return client.complete(model_ref, messages, max_tokens=max_tokens,
-                                   temperature=temperature)
-        except LLMError as exc:
+            return agent.ask_messages(messages, max_tokens=max_tokens,
+                                      temperature=temperature, stop=[], response_format={})
+        except (LLMError, AgentError) as exc:
             last = exc
             if number + 1 < attempts:
                 time.sleep(2.0)
@@ -129,7 +135,7 @@ def sent_panel(messages: List[dict], accent: str, title: str) -> RenderableType:
                  border_style=accent, box=box.ROUNDED, padding=(0, 1))
 
 
-def run_strategy(console: Console, client, model_ref: str, task: Task,
+def run_strategy(console: Console, agent: Agent, task: Task,
                  strategy: Strategy, show: bool = True, pause=None,
                  temperature: float = TEMPERATURE) -> Attempt:
     calls = 0
@@ -146,7 +152,7 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
                                      "Сначала просим модель написать промпт"))
         with console.status("[bold]модель пишет промпт…[/]", spinner="dots"):
             completion = complete_with_retry(
-                client, model_ref, [{"role": "user", "content": prompt}],
+                agent, [{"role": "user", "content": prompt}],
                 SELF_PROMPT_MAX_TOKENS, temperature)
         calls += 1
         tokens += completion.prompt_tokens + completion.completion_tokens
@@ -162,7 +168,7 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
         return completion.text
 
     if strategy.experts:
-        return run_experts(console, client, model_ref, task, strategy, show, started,
+        return run_experts(console, agent, task, strategy, show, started,
                            pause, temperature)
 
     messages = strategy.build(task, ask)
@@ -170,7 +176,7 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
         console.print(sent_panel(messages, strategy.accent, "Отправляем в модель"))
     with console.status("[bold]{} — модель отвечает…[/]".format(strategy.title),
                         spinner="dots"):
-        completion = complete_with_retry(client, model_ref, messages,
+        completion = complete_with_retry(agent, messages,
                                          ANSWER_MAX_TOKENS, temperature)
     calls += 1
     tokens += completion.prompt_tokens + completion.completion_tokens
@@ -180,7 +186,7 @@ def run_strategy(console: Console, client, model_ref: str, task: Task,
                    truncated=(completion.finish_reason == "length"))
 
 
-def run_experts(console: Console, client, model_ref: str, task: Task,
+def run_experts(console: Console, agent: Agent, task: Task,
                 strategy: Strategy, show: bool, started: float, pause=None,
                 temperature: float = TEMPERATURE) -> Attempt:
     """Каждый эксперт отвечает своим запросом и не видит чужих ответов."""
@@ -197,9 +203,9 @@ def run_experts(console: Console, client, model_ref: str, task: Task,
                                      "Отдельный запрос: {}".format(name)))
         try:
             with console.status("[bold]{} отвечает…[/]".format(name), spinner="dots"):
-                completion = complete_with_retry(client, model_ref, messages,
+                completion = complete_with_retry(agent, messages,
                                                  ANSWER_MAX_TOKENS, temperature)
-        except LLMError as exc:
+        except (LLMError, AgentError) as exc:
             # Отказ одного эксперта не должен рушить весь опыт: записываем
             # его как не ответившего и идём дальше.
             parts.append((name, None))
@@ -245,7 +251,7 @@ def run_experts(console: Console, client, model_ref: str, task: Task,
                    extracted_by="большинством голосов")
 
 
-def extract_final(console: Console, client, model_ref: str, attempt: Attempt) -> None:
+def extract_final(console: Console, agent: Agent, attempt: Attempt) -> None:
     """Достать итоговое число из ответа отдельным запросом.
 
     Разбор регулярками по свободному тексту принципиально хрупок: модели
@@ -259,18 +265,19 @@ def extract_final(console: Console, client, model_ref: str, attempt: Attempt) ->
     try:
         with console.status("[dim]извлекаю итог: {}…[/]".format(attempt.strategy.title),
                             spinner="dots"):
-            completion = client.complete(model_ref, [{"role": "user", "content": prompt}],
-                                         max_tokens=24, temperature=0.0)
+            completion = agent.ask_messages([{"role": "user", "content": prompt}],
+                                            max_tokens=24, temperature=0.0,
+                                            stop=[], response_format={})
         # Ответ модели-извлекателя главнее регулярки, в том числе когда она
         # говорит «итога нет»: пустое поле честнее случайного числа из текста.
         attempt.answer = parse_extracted(completion.text)
         attempt.extracted_by = "моделью"
-    except LLMError as exc:
+    except (LLMError, AgentError) as exc:
         attempt.extracted_by = "разбором текста (извлекатель недоступен)"
         attempt.judge_note = str(exc)[:50]
 
 
-def judge(console: Console, client, model_ref: str, task: Task,
+def judge(console: Console, agent: Agent, task: Task,
           attempt: Attempt) -> None:
     # Оценщику даём начало и конец: по одной середине о полноте не судят.
     body = attempt.text
@@ -283,10 +290,11 @@ def judge(console: Console, client, model_ref: str, task: Task,
         try:
             with console.status("[dim]оцениваю: {}…[/]".format(attempt.strategy.title),
                                 spinner="dots"):
-                completion = client.complete(
-                    model_ref, [{"role": "user", "content": prompt}],
-                    max_tokens=JUDGE_MAX_TOKENS + 80 * attempt_number, temperature=0.0)
-        except LLMError as exc:
+                completion = agent.ask_messages(
+                    [{"role": "user", "content": prompt}], kind="оценка",
+                    max_tokens=JUDGE_MAX_TOKENS + 80 * attempt_number, temperature=0.0,
+                    stop=[], response_format={})
+        except (LLMError, AgentError) as exc:
             attempt.judge_note = str(exc)[:60]
             return
         attempt.scores = parse_scores(completion.text)
@@ -296,28 +304,26 @@ def judge(console: Console, client, model_ref: str, task: Task,
     # Оценка — украшение: без неё опыт остаётся годным.
 
 
-def build_judge(console: Console, key: str, demo: bool):
-    """Собрать клиент-оценщик у другого провайдера, взяв ключ из файла."""
+def build_judge(console: Console, key: str, base) -> Optional[Agent]:
+    """Отдельный агент-оценщик у другого провайдера.
+
+    Реквизиты ищутся молча: спрашивать ключ посреди опыта неуместно, а без
+    ключа оценка просто останется за своей же моделью.
+    """
     provider = PROVIDERS.get(key)
     if provider is None:
         console.print("[red]Неизвестный провайдер для оценки: {}[/]".format(key))
-        return None, None
-    sources = find_sources(provider.api_key_env, provider.key_files)
-    if not sources and not demo:
-        console.print("[yellow]Нет сохранённого ключа для {} — оценка будет своей же "
-                      "моделью.[/]".format(provider.name))
-        return None, None
-    secret = sources[0].value if sources else "demo"
-    extra = None
-    if provider.extra_field is not None:
-        found = find_sources(None, provider.extra_field.files)
-        if not found:
-            console.print("[yellow]Нет каталога для {} — оценка будет своей же "
-                          "моделью.[/]".format(provider.name))
-            return None, None
-        extra = found[0].value
-    client = make_client(provider, secret, demo)
-    return client, provider.model_ref(provider.default_model, extra)
+        return None
+    config = base.with_changes(name="judge", provider=key,
+                               model=provider.default_model.id,
+                               api_key=None, api_extra=None)
+    try:
+        agent = Agent(config)
+        agent.credentials
+        return agent
+    except (MissingCredentials, AgentError) as exc:
+        console.print("[yellow]{} — оценка будет своей же моделью.[/]".format(exc))
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -613,20 +619,20 @@ def main(argv=None) -> int:
 
     console = make_console()
     try:
-        provider, model, model_ref, client = setup(console, args.demo, banner=banner,
-                                                   ask_keys=args.ask_keys)
+        config = setup(console, args.demo, banner=banner, ask_keys=args.ask_keys)
+        config = config.with_changes(name="reasoning", history=HISTORYLESS,
+                                     system_prompt="")
+        agent = Agent(config)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Отменено.[/]")
         return 130
 
-    judge_client, judge_ref = (None, None)
-    judge_name = "{} (та же модель)".format(model.id)
-    if args.judge:
-        judge_client, judge_ref = build_judge(console, args.judge, args.demo)
-        if judge_client is not None:
-            judge_name = "{} — другой провайдер".format(PROVIDERS[args.judge].name)
-    if judge_client is None:
-        judge_client, judge_ref = client, model_ref
+    judge_agent = build_judge(console, args.judge, config) if args.judge else None
+    judge_name = ("{} — другой провайдер".format(PROVIDERS[args.judge].name)
+                  if judge_agent is not None
+                  else "{} (та же модель)".format(config.model))
+    if judge_agent is None:
+        judge_agent = agent
 
     task = DIGIT_TASK
     console.clear()
@@ -655,16 +661,16 @@ def main(argv=None) -> int:
                     if stepping and not step(_console, True, prompt):
                         raise KeyboardInterrupt
 
-                attempt = run_strategy(console, client, model_ref, task, strategy,
+                attempt = run_strategy(console, agent, task, strategy,
                                        show=live, pause=hold if stepping else None,
                                        temperature=args.temperature)
                 # Итог достаём до отрисовки: иначе на панели останется число,
                 # найденное регуляркой, и оно разойдётся со строкой итога.
                 if not attempt.is_multi:
-                    extract_final(console, judge_client, judge_ref, attempt)
+                    extract_final(console, judge_agent, attempt)
                 if live and not attempt.is_multi:
                     console.print(attempt_panel(attempt))
-                judge(console, judge_client, judge_ref, task, attempt)
+                judge(console, judge_agent, task, attempt)
                 attempts.append(attempt)
                 if live:
                     console.print(result_line(attempt))

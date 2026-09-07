@@ -29,15 +29,18 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from llmagent import Agent, AgentError, Check, HistoryConfig, LLMError
+from llmagent.transport.client import JSON_HINT_NOTE, JSON_INSTRUCTION
 from llmchat.app import setup
-from llmchat.client import JSON_HINT_NOTE, JSON_INSTRUCTION, LLMError
-from llmchat.controls import Check
 from llmchat.ui import make_console, plural
 
 QUESTION = "Приведи список наиболее успешных книг Нассима Талеба."
 
 # Одна на все пять шагов: разная температура сделала бы сравнение нечестным.
 TEMPERATURE = 0.0
+
+# История опыту мешает: пять шагов должны быть независимы друг от друга.
+HISTORYLESS = HistoryConfig(enabled=False)
 
 HTML_INSTRUCTION = (
     "Ответ — фрагмент HTML: таблица <table> со столбцами «название», «год», «о чём». "
@@ -57,7 +60,7 @@ STOP_ON_FOURTH = ["\n4.", "\n4)", "\n**4"]
 # Договорный маркер. Латиница и знаки процента выбраны потому, что в живом тексте
 # такая последовательность не встречается и устойчиво разбивается на токены:
 # кириллический «###КОНЕЦ###» модель разбивала переносом строки, и стоп-строка
-# переставала срабатывать (см. llmchat/controls.py).
+# переставала срабатывать (см. llmagent/formats.py).
 AGREED_MARKER = "%%END%%"
 MARKER_REQUEST = (
     "Приведи список наиболее успешных книг Нассима Талеба. "
@@ -155,17 +158,21 @@ def main(argv=None) -> int:
 
     console = make_console()
     try:
-        provider, model, model_ref, client = setup(console, args.demo, banner=banner,
-                                                   ask_keys=args.ask_keys)
+        # Опыт строит каждый запрос сам, поэтому истории и политик агенту не
+        # задаём: сравнивать надо рычаги, а не поведение коробки вокруг них.
+        config = setup(console, args.demo, banner=banner, ask_keys=args.ask_keys)
+        agent = Agent(config.with_changes(
+            name="compare", history=HISTORYLESS, system_prompt=""))
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]Отменено.[/]")
         return 130
 
+    reserve = agent.output_reserve
     console.clear()
-    console.print(plan_panel(model.output_reserve))
+    console.print(plan_panel(reserve))
     wait(console, args.step, "Enter — начать опыт")
 
-    results = run_all(console, client, model_ref, model.output_reserve, args.step)
+    results = run_all(console, agent, reserve, args.step)
     if not results:
         return 1
 
@@ -174,18 +181,17 @@ def main(argv=None) -> int:
     return 0
 
 
-def run_all(console: Console, client, model_ref: str, reserve: int,
-            step: bool) -> List[StepResult]:
+def run_all(console: Console, agent: Agent, reserve: int, step: bool) -> List[StepResult]:
     """Пройти пять шагов, показывая каждый сразу после выполнения."""
-    steps: List[Callable[[Console, object, str, int], StepResult]] = [
+    steps: List[Callable[[Console, Agent, int], StepResult]] = [
         step_nothing, step_format_in_prompt, step_format_by_api,
         step_completion_condition, step_length_limit,
     ]
     results: List[StepResult] = []
     for run_step in steps:
         try:
-            result = run_step(console, client, model_ref, reserve)
-        except LLMError as exc:
+            result = run_step(console, agent, reserve)
+        except (LLMError, AgentError) as exc:
             console.print(Panel(Text(str(exc), style="red"), title="⚠ Ошибка",
                                 border_style="red", box=box.ROUNDED))
             return results
@@ -198,9 +204,9 @@ def run_all(console: Console, client, model_ref: str, reserve: int,
 # Шаги опыта
 # --------------------------------------------------------------------------
 
-def step_nothing(console: Console, client, model_ref: str, reserve: int) -> StepResult:
+def step_nothing(console: Console, agent: Agent, reserve: int) -> StepResult:
     request = Request(user=QUESTION, max_tokens=reserve)
-    reply = ask(console, client, model_ref, request, "запрос без единого ограничения…")
+    reply = ask(console, agent, request, "запрос без единого ограничения…")
     checks = [Check("Модель закончила сама, а не по лимиту",
                     reply.finish_reason == "stop",
                     "finish_reason = {}".format(reply.finish_reason))]
@@ -209,19 +215,19 @@ def step_nothing(console: Console, client, model_ref: str, reserve: int) -> Step
                       "{} символов свободного текста".format(len(reply.text)))
 
 
-def step_format_in_prompt(console: Console, client, model_ref: str, reserve: int) -> StepResult:
+def step_format_in_prompt(console: Console, agent: Agent, reserve: int) -> StepResult:
     request = Request(user=QUESTION, max_tokens=reserve, system=HTML_INSTRUCTION)
-    reply = ask(console, client, model_ref, request, "формат задан инструкцией в промпте…")
+    reply = ask(console, agent, request, "формат задан инструкцией в промпте…")
     return StepResult(2, "Формат в промпте", "инструкция: фрагмент HTML с таблицей",
                       [Shot("Инструкция плюс тот же вопрос", request, reply)],
                       check_html(reply.text),
                       "структура задана, держится на послушности модели")
 
 
-def step_format_by_api(console: Console, client, model_ref: str, reserve: int) -> StepResult:
+def step_format_by_api(console: Console, agent: Agent, reserve: int) -> StepResult:
     request = Request(user=QUESTION, max_tokens=reserve,
                       response_format={"type": "json_object"})
-    reply = ask(console, client, model_ref, request, "формат задан параметром запроса…")
+    reply = ask(console, agent, request, "формат задан параметром запроса…")
     if JSON_HINT_NOTE in reply.notes:
         request.added_system = JSON_INSTRUCTION
     checks, keys = check_json(reply.text)
@@ -231,7 +237,7 @@ def step_format_by_api(console: Console, client, model_ref: str, reserve: int) -
                       detail="имена полей придумала модель — {}".format(keys))
 
 
-def step_completion_condition(console: Console, client, model_ref: str,
+def step_completion_condition(console: Console, agent: Agent,
                               reserve: int) -> StepResult:
     listing = "{} {}".format(QUESTION, LIST_REQUEST)
     free = Request(user=listing, max_tokens=reserve)
@@ -240,27 +246,28 @@ def step_completion_condition(console: Console, client, model_ref: str,
 
     shots = [
         Shot("4а — без условия завершения", free,
-             ask(console, client, model_ref, free, "список без условия завершения…")),
+             ask(console, agent, free, "список без условия завершения…")),
         Shot("4б — stop на четвёртом пункте", stopped,
-             ask(console, client, model_ref, stopped, "тот же промпт, добавлен stop…")),
+             ask(console, agent, stopped, "тот же промпт, добавлен stop…")),
         Shot("4в — договорный маркер {}".format(AGREED_MARKER), agreed,
-             ask(console, client, model_ref, agreed, "маркер, о котором договорились…")),
+             ask(console, agent, agreed, "маркер, о котором договорились…")),
     ]
     return StepResult(4, "Условие завершения", "stop — обрыв на стороне провайдера",
                       shots, check_stop(shots), describe_stop(shots),
                       detail=describe_marker(shots), headline=1)
 
 
-def step_length_limit(console: Console, client, model_ref: str, reserve: int) -> StepResult:
+def step_length_limit(console: Console, agent: Agent, reserve: int) -> StepResult:
     request = Request(user=QUESTION, max_tokens=SHORT_MAX_TOKENS)
-    reply = ask(console, client, model_ref, request, "тот же вопрос, но лимит длины…")
+    reply = ask(console, agent, request, "тот же вопрос, но лимит длины…")
     return StepResult(5, "Ограничение длины", "max_tokens = {}".format(SHORT_MAX_TOKENS),
                       [Shot("Голый вопрос с лимитом", request, reply)],
                       check_length(reply),
                       "ответ не короче, а обрублен на полуслове")
 
 
-def ask(console: Console, client, model_ref: str, request: Request, status: str) -> Reply:
+def ask(console: Console, agent: Agent, request: Request, status: str) -> Reply:
+    """Один запрос опыта — через агента, чтобы расход попал в общий счёт."""
     messages = []
     if request.system:
         messages.append({"role": "system", "content": request.system})
@@ -269,11 +276,10 @@ def ask(console: Console, client, model_ref: str, request: Request, status: str)
     started = time.time()
     with console.status("[bold]{}[/]".format(status), spinner="dots"):
         try:
-            completion = client.complete(
-                model_ref, messages, max_tokens=request.max_tokens,
-                temperature=TEMPERATURE, stop=request.stop,
-                response_format=request.response_format)
-        except LLMError as exc:
+            completion = agent.ask_messages(
+                messages, max_tokens=request.max_tokens, temperature=TEMPERATURE,
+                stop=request.stop or [], response_format=request.response_format or {})
+        except (LLMError, AgentError) as exc:
             # Пустой ответ — тоже результат опыта: стоп-строка могла срезать всё.
             return Reply(error=str(exc), seconds=time.time() - started)
     return Reply(completion.text, completion.prompt_tokens, completion.completion_tokens,

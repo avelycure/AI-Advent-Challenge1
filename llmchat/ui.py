@@ -16,10 +16,18 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-from .params import SPECS
-from .providers import PROVIDER_ORDER, PROVIDERS, ModelInfo, ProviderInfo
-from .secrets import find_sources, mask
-from .session import Message, Session
+from llmagent import Message
+from llmagent.params import SPECS
+from llmagent.transport import (
+    PROVIDER_ORDER,
+    PROVIDERS,
+    ModelInfo,
+    ProviderInfo,
+    find_sources,
+    mask,
+)
+
+from .session import Session
 
 BAR_WIDTH = 26
 USER_ACCENT = "cyan"
@@ -615,6 +623,7 @@ COMMANDS: List[tuple] = [
     ("/help", "эта справка"),
     ("/history", "показать всю переписку целиком"),
     ("/stats", "подробная статистика по токенам"),
+    ("/config", "конфиг агента целиком — его можно сохранить и запустить с --config"),
     ("/change_llm_params", "изменить параметры генерации; без аргументов — "
                            "таблица с текущими значениями"),
     ("/reset_llm_params", "вернуть параметры к значениям по умолчанию"),

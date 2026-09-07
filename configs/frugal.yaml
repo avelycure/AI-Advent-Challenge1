@@ -1,0 +1,17 @@
+# Экономный агент: короткие запросы, короткие ответы, жёсткий потолок трат.
+# Дойдя до предела, агент поднимает BudgetExceeded и запрос не отправляет.
+name: frugal
+provider: openai
+model: gpt-5.4-nano
+system_prompt: Отвечай одним-двумя предложениями. Никакой воды.
+generation:
+  temperature: 0.2
+  max_tokens: 200
+input:
+  max_chars: 500
+  on_too_long: trim     # длинный запрос обрезается, а не отклоняется
+  forbid_empty: true
+budget:
+  max_tokens: 50000
+  max_cost: 0.05
+  max_requests: 100

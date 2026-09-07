@@ -1,0 +1,152 @@
+"""Учёт расхода: токены, время, деньги и лимиты.
+
+Счётчики живут в агенте, а не в интерфейсе, потому что расход — свойство
+работы агента, а не картинки на экране. Точные цифры приходят от API в поле
+``usage`` каждого ответа; локальная оценка нужна только для ещё не
+отправленного текста.
+
+Запросы делятся по назначению: основной ответ, переспрос после нарушения
+политики, оценка судьёй и служебные вроде темы диалога. Без этого разбиения
+непонятно, за что заплачено: короткий ответ с судьёй и двумя переспросами
+стоит дороже длинного ответа с первого раза.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+from .errors import BudgetExceeded
+from .transport import ModelInfo, ProviderInfo, request_cost
+
+MAIN = "основной"
+REPAIR = "переспрос"
+JUDGE = "оценка"
+SIDE = "служебный"
+
+KINDS = (MAIN, REPAIR, JUDGE, SIDE)
+
+
+@dataclass
+class Spent:
+    """Расход по одному виду запросов."""
+
+    requests: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    seconds: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+@dataclass
+class UsageMeter:
+    """Расход агента за всё время его жизни."""
+
+    by_kind: Dict[str, Spent] = field(default_factory=lambda: {k: Spent() for k in KINDS})
+    # По каждой валюте отдельно: рубли с долларами не складываются.
+    costs: Dict[str, float] = field(default_factory=dict)
+    # Запросы к моделям, цена которых не задана: без этого счётчика итоговая
+    # сумма выглядела бы полной, хотя часть расхода в неё не вошла.
+    unpriced_requests: int = 0
+
+    def record(self, completion, provider: ProviderInfo, model: ModelInfo,
+               kind: str = MAIN) -> Optional[float]:
+        """Записать один ответ провайдера. Возвращает стоимость запроса."""
+        spent = self.by_kind.setdefault(kind, Spent())
+        spent.requests += 1
+        spent.prompt_tokens += completion.prompt_tokens
+        spent.completion_tokens += completion.completion_tokens
+        spent.reasoning_tokens += completion.reasoning_tokens
+        spent.seconds += completion.elapsed
+
+        cost = request_cost(provider, model, completion.prompt_tokens,
+                            completion.completion_tokens, completion.cached_tokens)
+        if cost is None:
+            self.unpriced_requests += 1
+        else:
+            self.costs[model.currency] = self.costs.get(model.currency, 0.0) + cost
+        return cost
+
+    def absorb(self, other: "UsageMeter") -> None:
+        """Вобрать расход другого счётчика — например, судьи со своей моделью."""
+        for kind, spent in other.by_kind.items():
+            mine = self.by_kind.setdefault(kind, Spent())
+            mine.requests += spent.requests
+            mine.prompt_tokens += spent.prompt_tokens
+            mine.completion_tokens += spent.completion_tokens
+            mine.reasoning_tokens += spent.reasoning_tokens
+            mine.seconds += spent.seconds
+        for currency, amount in other.costs.items():
+            self.costs[currency] = self.costs.get(currency, 0.0) + amount
+        self.unpriced_requests += other.unpriced_requests
+
+    # --- итоги ---------------------------------------------------------
+    def _sum(self, attribute: str):
+        return sum(getattr(spent, attribute) for spent in self.by_kind.values())
+
+    @property
+    def requests(self) -> int:
+        return self._sum("requests")
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self._sum("prompt_tokens")
+
+    @property
+    def completion_tokens(self) -> int:
+        return self._sum("completion_tokens")
+
+    @property
+    def reasoning_tokens(self) -> int:
+        return self._sum("reasoning_tokens")
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def seconds(self) -> float:
+        return self._sum("seconds")
+
+    @property
+    def avg_seconds(self) -> float:
+        return self.seconds / self.requests if self.requests else 0.0
+
+    def cost(self, currency: str = "USD") -> float:
+        return self.costs.get(currency, 0.0)
+
+    # --- лимиты --------------------------------------------------------
+    def check(self, budget, upcoming_tokens: int = 0) -> None:
+        """Не пора ли остановиться. Проверка до запроса, а не после траты."""
+        if budget.max_requests is not None and self.requests >= budget.max_requests:
+            raise BudgetExceeded("исчерпан лимит запросов: {} из {}".format(
+                self.requests, budget.max_requests))
+        if budget.max_tokens is not None:
+            planned = self.total_tokens + upcoming_tokens
+            if planned > budget.max_tokens:
+                raise BudgetExceeded(
+                    "лимит токенов {} будет превышен: потрачено {}, в запросе ещё ~{}".format(
+                        budget.max_tokens, self.total_tokens, upcoming_tokens))
+        if budget.max_cost is not None:
+            spent = max(self.costs.values()) if self.costs else 0.0
+            if spent >= budget.max_cost:
+                raise BudgetExceeded("исчерпан денежный лимит: {:.4f} из {:.4f}".format(
+                    spent, budget.max_cost))
+
+    def snapshot(self) -> Dict[str, object]:
+        """Плоская сводка — для отчётов, тестов и тела HTTP-ответа."""
+        return {
+            "requests": self.requests,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "total_tokens": self.total_tokens,
+            "seconds": round(self.seconds, 3),
+            "costs": {currency: round(amount, 6) for currency, amount in self.costs.items()},
+            "unpriced_requests": self.unpriced_requests,
+            "by_kind": {kind: spent.total_tokens for kind, spent in self.by_kind.items()
+                        if spent.requests},
+        }

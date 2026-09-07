@@ -1,0 +1,40 @@
+# Значения по умолчанию, выписанные полностью. Копируйте и правьте под себя.
+name: default
+provider: openai
+model: gpt-5.4-mini
+api_key: null        # null — взять из OPENAI_API_KEY или ~/.openai-key
+api_extra: null      # второй реквизит; нужен только YandexGPT (folder id)
+system_prompt: >-
+  Ты — полезный ассистент, который общается с пользователем в терминале.
+  Отвечай на языке пользователя, по существу и без лишней воды.
+  Форматирование Markdown допустимо: списки, заголовки, блоки кода.
+generation:
+  max_tokens: null   # null — взять резерв под ответ у модели
+  temperature: 0.7
+  top_p: null
+  stop: null
+  response_format: null
+input:
+  max_chars: 8000
+  forbid_empty: true
+  strip: true
+  template: null
+  forbidden: []
+  on_too_long: reject
+output:
+  format: free       # free | json | yaml | md
+  stop_marker: null
+  strip_fence: true
+  max_attempts: 1
+  require_valid: false
+judge: null
+history:
+  enabled: true
+  keep_last_answer: true
+budget:
+  max_tokens: null
+  max_cost: null
+  max_requests: null
+transport:
+  demo: false
+  demo_delay: null

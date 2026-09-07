@@ -1,0 +1,32 @@
+# Строгий структурный ответ. Три рычага работают вместе: инструкция в
+# системном промпте, response_format и stop на стороне провайдера, разбор
+# со сверкой по схеме на нашей. Не сошлось — агент переспрашивает сам.
+name: books-json
+provider: openai
+model: gpt-5.4-mini
+system_prompt: Ты справочник по книгам. Отвечаешь только данными.
+generation:
+  temperature: 0.0
+  max_tokens: 700
+output:
+  format: json
+  stop_marker: "%%END%%"
+  max_attempts: 3
+  require_valid: false
+  schema:
+    key: items
+    item_count: 5
+    allow_extra_fields: false
+    fields:
+      - name: name
+        kind: строка
+        max_len: 60
+      - name: year
+        kind: целое число
+        minimum: 1400
+        maximum: 2030
+      - name: note
+        kind: строка
+        max_len: 60
+history:
+  enabled: false     # справочник: каждый запрос сам по себе

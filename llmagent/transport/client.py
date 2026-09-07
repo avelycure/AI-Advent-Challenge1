@@ -56,6 +56,9 @@ class Completion:
     reasoning_tokens: int = 0
     # Часть входа, зачтённая провайдером по кешу и потому более дешёвая.
     cached_tokens: int = 0
+    # Стоимость запроса. Заполняет счётчик агента: цена живёт в каталоге
+    # моделей, а не в транспорте, и до записи в счётчик она неизвестна.
+    cost: Optional[float] = None
 
 
 # --------------------------------------------------------------------------
@@ -492,12 +495,22 @@ DEMO_REPLIES = [
 class DemoClient:
     """Заглушка для проверки интерфейса и логики без обращения к сети."""
 
-    def __init__(self, provider: ProviderInfo, api_key: str) -> None:
+    def __init__(self, provider: ProviderInfo, api_key: str,
+                 delay: Optional[float] = None) -> None:
         self.provider = provider
         self._counter = 0
+        # None — обычная «живая» пауза, чтобы в интерфейсе было видно ожидание.
+        # 0.0 ставят тесты и массовый прогон: сотня агентов не должна ждать зря.
+        self._delay = delay
+
+    def _pause(self, low: float, high: float) -> None:
+        if self._delay is None:
+            time.sleep(random.uniform(low, high))
+        elif self._delay > 0:
+            time.sleep(self._delay)
 
     def validate_key(self) -> None:
-        time.sleep(0.6)
+        self._pause(0.6, 0.6)
 
     def complete(
         self,
@@ -510,7 +523,7 @@ class DemoClient:
         response_format: Optional[Dict[str, str]] = None,
     ) -> Completion:
         started = time.perf_counter()
-        time.sleep(random.uniform(1.2, 2.2))
+        self._pause(1.2, 2.2)
         last_user = next(
             (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
         )
@@ -528,10 +541,11 @@ class DemoClient:
         )
 
 
-def make_client(provider: ProviderInfo, secret: str, demo: bool):
+def make_client(provider: ProviderInfo, secret: str, demo: bool,
+                demo_delay: Optional[float] = None):
     """Собрать клиент, подходящий выбранному провайдеру."""
     if demo:
-        return DemoClient(provider, secret)
+        return DemoClient(provider, secret, demo_delay)
     if provider.oauth is not None:
         return GigaChatClient(provider, secret)
     return LLMClient(provider, secret)
