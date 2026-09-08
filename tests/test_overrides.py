@@ -178,3 +178,35 @@ def test_string_fields_are_not_parsed_as_yaml(path):
     for segment in path.split("."):
         holder = getattr(holder, segment)
     assert holder == value
+
+
+@pytest.mark.parametrize("bad,expect", [
+    ("generation.max_tokens=true", "получено логическое"),
+    ("output.require_valid=да", "true или false"),
+    ("budget.max_requests=3.7", "целое число"),
+    ("budget.max_cost=пять", "нужно число"),
+    ("generation.temperature=жарко", "нужно число"),
+])
+def test_value_must_match_the_declared_type(bad, expect):
+    """Негодное значение отвергается сразу, а не падает много позже.
+
+    Проверка появилась после того, как --max-cost 0.0000001 уронил агента
+    внутри проверки бюджета: YAML не считает числом запись 1e-07, значение
+    доехало до конфига строкой и сравнилось с числом.
+    """
+    with pytest.raises(ConfigError) as info:
+        overrides.apply(BASE, [bad])
+    assert expect in str(info.value)
+
+
+@pytest.mark.parametrize("assignment,path,expected", [
+    ("budget.max_cost=1e-07", "budget.max_cost", 1e-07),   # запись без точки
+    ("generation.temperature=1", "generation.temperature", 1.0),   # целое в дробное
+    ("budget.max_requests=3.0", "budget.max_requests", 3),         # ровное дробное
+])
+def test_numbers_are_brought_to_the_declared_type(assignment, path, expected):
+    config = overrides.apply(BASE, [assignment])
+    holder = config
+    for segment in path.split("."):
+        holder = getattr(holder, segment)
+    assert holder == expected and type(holder) is type(expected)

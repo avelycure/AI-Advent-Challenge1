@@ -556,3 +556,24 @@ def test_new_session_starts_the_count_afresh():
     assert agent.session_id != first
     assert agent.usage.total_tokens == 0
     assert agent.usage.requests == 0
+
+
+def test_failed_form_is_flagged_in_the_parent_memory():
+    """Человеку про несоблюдённую форму говорит панель, а модели — оговорка."""
+    parent = Agent(AgentConfig(name="parent", transport=FAST_DEMO),
+                   client=ScriptedClient("ответ родителя"))
+    delegation = subagent.run("books-json", "Книги Талеба", parent.config)
+    assert delegation.ok and not delegation.valid
+
+    from llmchat.app import delegation_caveat
+    parent.record_delegation(delegation.name, delegation.question, delegation.text,
+                             delegation_caveat(delegation))
+    note = parent.conversation.messages[-1].content
+    assert "Оговорка" in note and "не прошёл проверку формы" in note
+
+
+def test_good_form_gets_no_caveat():
+    from llmchat.app import delegation_caveat
+    from llmchat.subagent import Delegation
+
+    assert delegation_caveat(Delegation("x", "q", valid=True)) == ""

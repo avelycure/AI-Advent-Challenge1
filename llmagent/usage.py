@@ -140,7 +140,8 @@ class UsageMeter:
         return self.costs.get(currency, 0.0)
 
     # --- лимиты --------------------------------------------------------
-    def check(self, budget, upcoming_tokens: int = 0) -> None:
+    def check(self, budget, upcoming_tokens: int = 0,
+              upcoming_cost: Optional[float] = None) -> None:
         """Не пора ли остановиться. Проверка до запроса, а не после траты."""
         if budget.max_requests is not None and self.requests >= budget.max_requests:
             raise BudgetExceeded("исчерпан лимит запросов: {} из {}".format(
@@ -153,8 +154,17 @@ class UsageMeter:
                         budget.max_tokens, self.total_tokens, upcoming_tokens))
         if budget.max_cost is not None:
             spent = max(self.costs.values()) if self.costs else 0.0
+            # Прикидку стоимости учитываем намеренно. Без неё потолок ниже цены
+            # одного запроса ни от чего не защищал: первый запрос уходил всегда,
+            # и лимит срабатывал уже после того, как деньги были потрачены.
+            planned = spent + (upcoming_cost or 0.0)
+            if planned > budget.max_cost:
+                raise BudgetExceeded(
+                    "денежный лимит {:.6f} будет превышен: потрачено {:.6f}, "
+                    "этот запрос обойдётся примерно в {:.6f}".format(
+                        budget.max_cost, spent, upcoming_cost or 0.0))
             if spent >= budget.max_cost:
-                raise BudgetExceeded("исчерпан денежный лимит: {:.4f} из {:.4f}".format(
+                raise BudgetExceeded("исчерпан денежный лимит: {:.6f} из {:.6f}".format(
                     spent, budget.max_cost))
 
     # --- сохранение ----------------------------------------------------

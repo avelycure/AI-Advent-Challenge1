@@ -278,13 +278,19 @@ def stats_panel(session: Session) -> RenderableType:
 def kind_breakdown(session: Session) -> str:
     """Расход по назначению запроса: ответ, переспрос, оценка, служебное.
 
-    Строка появляется, только когда назначений больше одного: в обычном диалоге
-    все запросы основные, и повторять это незачем.
+    Строка прячется только в одном случае: все запросы основные. Тогда она и
+    правда лишняя. А вот единственный запрос вида «под-агент» скрывать нельзя:
+    человек увидел бы «запросов к API — 1» и решил, что это его собственный
+    вопрос, хотя своих вопросов он ещё не задавал.
     """
-    parts = ["{} — {} {}".format(kind, spent.requests,
-                                 plural(spent.requests, ("запрос", "запроса", "запросов")))
-             for kind, spent in session.agent.usage.by_kind.items() if spent.requests]
-    return " · ".join(parts) if len(parts) > 1 else ""
+    spent_by_kind = [(kind, spent) for kind, spent in session.agent.usage.by_kind.items()
+                     if spent.requests]
+    if len(spent_by_kind) == 1 and spent_by_kind[0][0] == MAIN:
+        return ""
+    return " · ".join("{} — {} {}".format(
+        kind, spent.requests,
+        plural(spent.requests, ("запрос", "запроса", "запросов")))
+        for kind, spent in spent_by_kind)
 
 
 def config_panel(session: Session) -> RenderableType:
@@ -539,12 +545,24 @@ def delegate(console: Console, session: Session, argument: str) -> RenderableTyp
 
     if delegation.ok:
         session.agent.record_delegation(delegation.name, delegation.question,
-                                        delegation.text)
+                                        delegation.text, delegation_caveat(delegation))
         session.agent.absorb_delegation(delegation.prompt_tokens,
                                         delegation.completion_tokens,
                                         delegation.seconds, delegation.cost,
                                         delegation.currency)
     return subagent.panel(delegation)
+
+
+def delegation_caveat(delegation) -> str:
+    """Оговорка к ответу под-агента, которую надо донести и до модели."""
+    if delegation.valid:
+        return ""
+    failed = [str(check.get("name")) for check in delegation.checks
+              if not check.get("passed")]
+    return ("ответ не прошёл проверку формы за {} {}{}".format(
+        delegation.attempts,
+        plural(delegation.attempts, ("попытку", "попытки", "попыток")),
+        ": " + ", ".join(failed[:2]) if failed else ""))
 
 
 def request_answer(console: Console, session: Session, ask=None):
@@ -661,9 +679,12 @@ def named_pairs(args: argparse.Namespace) -> List[tuple]:
     for attribute, path in FLAG_FIELDS:
         value = getattr(args, attribute, None)
         if value is not None:
-            pairs.append((path, str(value)))
+            # Значение отдаём как есть: argparse уже привёл его к типу, и
+            # прогон через запись строкой и обратно только добавлял бы
+            # способов ошибиться — на 0.0000001 он и ошибался.
+            pairs.append((path, value))
     if args.no_history:
-        pairs.append(("history.enabled", "false"))
+        pairs.append(("history.enabled", False))
     return pairs
 
 

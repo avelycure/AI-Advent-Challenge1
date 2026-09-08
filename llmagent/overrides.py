@@ -47,27 +47,71 @@ def parse_assignment(text: str) -> Tuple[str, str]:
     return expand(path), raw.strip()
 
 
-def coerce(path: str, current: Any, raw: str) -> Any:
-    """Привести значение к типу поля.
+def coerce(path: str, current: Any, raw: Any) -> Any:
+    """Привести значение к типу поля и проверить, что оно ему подходит.
 
     Тип берётся из объявления конфига. Строку оставляем строкой: иначе
     ``model=gpt-5.4`` превратилось бы в число, имя вида ``2024`` — в целое,
     а шаблон ``Переведи на английский: {input}`` — в словарь YAML. Всё прочее
     разбираем как значение YAML, поэтому ``false`` становится логическим,
     ``300`` — числом, а ``null`` — пустым значением.
+
+    Итог обязательно сверяется с объявленным типом. Без сверки негодное
+    значение доезжало до конфига и падало много позже и совсем не там:
+    ``--max-cost 0.0000001`` роняло агента при проверке бюджета, потому что
+    YAML не считает числом запись ``1e-07`` — в YAML 1.1 нужна точка.
     """
     declared = field_type(path)
     if declared is str or (declared is None and isinstance(current, str)):
-        return raw
-    import yaml
+        return raw if isinstance(raw, str) else str(raw)
 
-    try:
-        return yaml.safe_load(raw)
-    except Exception:  # noqa: BLE001 — непонятное значение остаётся строкой
-        return raw
+    value = raw
+    if isinstance(raw, str):
+        import yaml
+
+        try:
+            value = yaml.safe_load(raw)
+        except Exception:  # noqa: BLE001 — непонятное значение проверим ниже
+            value = raw
+    return _checked(path, declared, value, raw)
 
 
-def set_path(payload: Dict[str, Any], path: str, raw: str) -> None:
+def _checked(path: str, declared: Optional[type], value: Any, raw: Any) -> Any:
+    """Сверить значение с объявленным типом поля, по возможности приведя его."""
+    if declared is None or value is None:
+        return value
+
+    # Проверка на логическое идёт первой намеренно: bool в Python — подкласс
+    # int, и обычная проверка типа пропускала бы max_tokens=true как число.
+    if isinstance(value, bool) is not (declared is bool):
+        raise ConfigError("{}: нужно {}, а получено {}".format(
+            path, _name_of(declared),
+            "логическое значение" if isinstance(value, bool) else "«{}»".format(raw)))
+
+    if isinstance(value, declared):
+        return value
+    if declared is float and isinstance(value, int):
+        return float(value)
+    if declared is int and isinstance(value, float) and value.is_integer():
+        return int(value)
+    if declared in (int, float) and isinstance(value, str):
+        # YAML не считает числом запись без точки в порядке вида 1e-07,
+        # а человек её пишет. Приводим сами, но не молча: не получилось —
+        # ошибка ниже.
+        try:
+            return declared(value)
+        except ValueError:
+            pass
+    raise ConfigError("{}: нужно {}, а «{}» на это не похоже".format(
+        path, _name_of(declared), raw))
+
+
+def _name_of(declared: type) -> str:
+    return {int: "целое число", float: "число", bool: "true или false",
+            str: "строка"}.get(declared, declared.__name__)
+
+
+def set_path(payload: Dict[str, Any], path: str, raw: Any) -> None:
     """Положить значение по пути внутрь словаря конфига."""
     segments = [part for part in path.split(".") if part]
     if not segments:
@@ -115,7 +159,7 @@ def apply(config: AgentConfig, assignments: Iterable[str]) -> AgentConfig:
     return apply_pairs(config, [parse_assignment(item) for item in assignments])
 
 
-def apply_pairs(config: AgentConfig, pairs: Iterable[Tuple[str, str]]) -> AgentConfig:
+def apply_pairs(config: AgentConfig, pairs: Iterable[Tuple[str, Any]]) -> AgentConfig:
     """То же для уже разобранных пар — так задаются именованные флаги."""
     pairs = list(pairs)
     if not pairs:

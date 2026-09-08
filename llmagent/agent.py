@@ -20,7 +20,7 @@ from .errors import OutputRejected
 from .history import Conversation
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
-from .transport import Completion, count_message_tokens
+from .transport import Completion, count_message_tokens, request_cost
 from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, UsageMeter
 
 
@@ -253,11 +253,15 @@ class Agent:
         """Обращение к провайдеру с проверкой бюджета и записью расхода."""
         params = self._config.generation
         reserve = max_tokens if max_tokens is not None else self.output_reserve
-
-        self.usage.check(self._config.budget,
-                         upcoming_tokens=count_message_tokens(messages) + reserve)
-
         provider, model = self._config.resolve()
+
+        planned_input = count_message_tokens(messages)
+        self.usage.check(
+            self._config.budget,
+            upcoming_tokens=planned_input + reserve,
+            # Худший случай: модель израсходует весь отведённый ей предел.
+            # Занижать прикидку нельзя — потолок трат обещан как потолок.
+            upcoming_cost=request_cost(provider, model, planned_input, reserve))
         completion = self.client.complete(
             self.model_ref,
             messages,
@@ -385,17 +389,24 @@ class Agent:
         self._judge_agent.usage = UsageMeter()
         return completion
 
-    def record_delegation(self, name: str, question: str, answer: str):
+    def record_delegation(self, name: str, question: str, answer: str,
+                          caveat: str = ""):
         """Принять в память сессии ответ под-агента.
 
         Под-агент — отдельная сессия со своей памятью, и его переписки мы не
         видим. В родительскую память попадает только итог, и попадает явно
         помеченным: дальше модель сможет на него ссылаться, но не спутает
         его со своим собственным ответом.
+
+        ``caveat`` — оговорка к ответу, например что форма не соблюдена. Без
+        неё негодные данные лежали бы в памяти наравне с годными: человеку об
+        этом сказали панелью, а модели — нет.
         """
-        note = ("[под-агент {}] Ему был задан вопрос: {}\n\n"
-                "Он ответил:\n{}".format(name, question, answer))
-        return self.conversation.add_note(note, model=name)
+        head = "[под-агент {}] Ему был задан вопрос: {}".format(name, question)
+        if caveat:
+            head += "\nОговорка: {}".format(caveat)
+        return self.conversation.add_note(
+            head + "\n\nОн ответил:\n{}".format(answer), model=name)
 
     def absorb_delegation(self, prompt_tokens: int, completion_tokens: int,
                           seconds: float = 0.0, cost: Optional[float] = None,

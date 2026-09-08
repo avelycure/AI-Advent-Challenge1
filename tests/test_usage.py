@@ -86,3 +86,28 @@ def test_limits_trigger_before_the_money_is_spent():
         meter.check(Budget(max_requests=1))
     with pytest.raises(BudgetExceeded):
         meter.check(Budget(max_cost=0.0001))
+
+
+def test_cost_ceiling_stops_the_first_request_too():
+    """Потолок ниже цены одного запроса обязан защищать, а не срабатывать после.
+
+    Раньше проверка смотрела только на уже потраченное, поэтому первый запрос
+    уходил при любом потолке — и лимит узнавал о трате, когда деньги ушли.
+    """
+    meter = UsageMeter()
+    with pytest.raises(BudgetExceeded) as info:
+        meter.check(Budget(max_cost=0.0000001), upcoming_tokens=1000,
+                    upcoming_cost=0.0007)
+    assert "будет превышен" in str(info.value)
+    assert meter.requests == 0
+
+
+def test_generous_ceiling_lets_the_request_through():
+    UsageMeter().check(Budget(max_cost=1.0), upcoming_tokens=1000, upcoming_cost=0.0007)
+
+
+def test_ceiling_still_triggers_on_what_is_already_spent():
+    meter = UsageMeter()
+    meter.record(completion(1_000_000, 1_000_000), OPENAI, MINI)
+    with pytest.raises(BudgetExceeded):
+        meter.check(Budget(max_cost=0.01))
