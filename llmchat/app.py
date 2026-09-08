@@ -47,6 +47,7 @@ from .ui import (
     fmt,
     help_panel,
     info_panel,
+    enable_bracketed_paste,
     make_console,
     plural,
     read_user_line,
@@ -138,13 +139,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def enable_line_editing() -> None:
-    """Стрелки и история ввода в строке запроса, если readline доступен."""
+    """Стрелки, история ввода и целая вставка из буфера обмена."""
     try:
         # Импорт ради побочного эффекта: readline включает стрелки, Home/End
         # и историю ввода в стандартном input().
         importlib.import_module("readline")
     except Exception:
         pass
+    enable_bracketed_paste()
 
 
 # --------------------------------------------------------------------------
