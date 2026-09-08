@@ -42,6 +42,20 @@ TIMEOUT = 300.0
 # бессмысленны, потому что она отвечает заранее заготовленной прозой.
 LIVE_ONLY = "требует живой модели"
 
+# Бесплатные тарифы отвечают отказом 429, если стрелять быстро. Это про тариф,
+# а не про агента, поэтому проверка ждёт и пробует снова.
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_PAUSE = 8.0
+
+
+def flat(text: str) -> str:
+    """Текст без переносов и лишних пробелов.
+
+    Панели ``rich`` переносят строки по ширине окна, поэтому искать в выводе
+    целую фразу можно только так: иначе проверка ломается от смены ширины.
+    """
+    return " ".join(text.split())
+
 
 @dataclass
 class Outcome:
@@ -61,9 +75,13 @@ class Scenario:
 class Harness:
     """Запуск настоящей программы в отдельном домашнем каталоге."""
 
-    def __init__(self, live: bool, console: Console) -> None:
+    def __init__(self, live: bool, console: Console, provider: str = "",
+                 model: str = "") -> None:
         self.live = live
         self.console = console
+        self.provider = provider
+        self.model = model
+        self.throttled = 0
         self.homes: List[pathlib.Path] = []
         self.home = self._new_home()
         # Реквизиты в живом режиме нужны настоящие, поэтому окружение
@@ -77,6 +95,24 @@ class Harness:
             # Ключ ищется в настоящем домашнем каталоге, а не в подменённом.
             for name, path in real_key_files().items():
                 self.environment.setdefault(name, path)
+
+    @property
+    def free_tariff(self) -> bool:
+        """Бесплатный тариф: цена запроса нулевая, и потолку трат нечего ловить."""
+        from llmagent.transport import PROVIDERS
+
+        if not self.live:
+            return False
+        return PROVIDERS[self.provider].free
+
+    def other_model(self) -> str:
+        """Ещё одна модель того же провайдера — для проверки правок конфига."""
+        from llmagent.transport import PROVIDERS
+
+        if not self.live:
+            return "gpt-5.4"
+        models = [m.id for m in PROVIDERS[self.provider].models if m.id != self.model]
+        return models[0] if models else self.model
 
     def _new_home(self) -> pathlib.Path:
         home = pathlib.Path(tempfile.mkdtemp(prefix="livecheck-home-"))
@@ -106,28 +142,52 @@ class Harness:
         заглушку даже для конфигов, в которых её нет.
         """
         if self.live:
-            return ["--config", "default"]
+            # Конфиг задаём всегда, иначе начнётся расспрос. Провайдера и
+            # модель — флагами: они перебивают конфиг, поэтому сценарий может
+            # взять свой конфиг из configs/, а модель останется заданной здесь.
+            return ["--config", "default", "--provider", self.provider,
+                    "--model", self.model]
         return ["--demo", "--config", "demo", "--set", "transport.demo_delay=0"]
 
     def run(self, *arguments: str, script: str = "", check: bool = False):
+        """Один запуск программы. При отказе по частоте — пауза и повтор.
+
+        Бесплатные тарифы ограничивают частоту, и сценарии стреляют быстрее,
+        чем те разрешают. Отказ 429 — это про тариф, а не про агента, поэтому
+        обвязка ждёт и пробует снова, а не записывает провал.
+        """
         command = [sys.executable, str(ENTRY), *self.base, *arguments]
-        finished = subprocess.run(command, cwd=str(ROOT), input=script,
-                                  capture_output=True, text=True,
-                                  env=self.environment, timeout=TIMEOUT)
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            finished = subprocess.run(command, cwd=str(ROOT), input=script,
+                                      capture_output=True, text=True,
+                                      env=self.environment, timeout=TIMEOUT)
+            whole = finished.stdout + finished.stderr
+            if not (self.live and "429" in whole and attempt < RATE_LIMIT_RETRIES):
+                break
+            self.throttled += 1
+            time.sleep(RATE_LIMIT_PAUSE)
         if check and finished.returncode != 0:
             raise AssertionError("код {}: {}".format(
                 finished.returncode, (finished.stdout + finished.stderr)[-400:]))
         return finished
 
-    def ask_json(self, question: str, *options: str) -> dict:
+    def ask_json(self, question: str, *options: str, allow_failure: bool = False) -> dict:
         """Один вопрос с разбором ответа. Вопрос отдельно от флагов: иначе он
-        рискует занять место значения соседнего флага."""
+        рискует занять место значения соседнего флага.
+
+        Неудачный ответ поднимается как понятная ошибка, а не превращается в
+        ``KeyError`` на отсутствующем поле: причина должна быть видна сразу.
+        """
         finished = self.run(*options, "--ask", question, "--json")
         try:
-            return json.loads(finished.stdout)
+            payload = json.loads(finished.stdout)
         except ValueError:
             raise AssertionError("не JSON: {}".format(
                 (finished.stdout + finished.stderr)[-300:]))
+        if not allow_failure and not payload.get("ok"):
+            raise AssertionError("запрос не удался: {}".format(
+                payload.get("error", "без объяснения"))[:200])
+        return payload
 
     def sessions(self) -> List[pathlib.Path]:
         return sorted((self.home / ".llm-agent" / "sessions").glob("*.json"))
@@ -163,8 +223,8 @@ def scenario(requirement: str, title: str, live_only: bool = False):
 
 @scenario("1-4", "разговор в терминале: вопрос, ответ, счётчики на экране")
 def talk(harness: Harness) -> Outcome:
-    shown = harness.run(script="Назови три языка программирования\n/exit\n",
-                        check=True).stdout
+    shown = flat(harness.run(script="Назови три языка программирования\n/exit\n",
+                             check=True).stdout)
     marks = ["🧑 Вы" in shown or "Вы ›" in shown, "🤖" in shown,
              "Контекст" in shown, "потрачено" in shown]
     return Outcome(all(marks), "панели вопроса, ответа, окна и расхода: {}/4".format(
@@ -202,7 +262,8 @@ def input_policy(harness: Harness) -> Outcome:
 
 @scenario("10", "выходная политика: JSON по схеме, переспрос при нарушении")
 def output_policy(harness: Harness) -> Outcome:
-    payload = harness.ask_json("Книги Нассима Талеба", "--config", "books-json")
+    payload = harness.ask_json("Книги Нассима Талеба", "--config", "books-json",
+                               allow_failure=True)
     checks = payload.get("checks") or []
     if not harness.live:
         # Заглушка отвечает прозой, поэтому проверяем сам механизм: проверки
@@ -218,8 +279,13 @@ def output_policy(harness: Harness) -> Outcome:
 
 @scenario("11", "судья оценивает ответ отдельной моделью")
 def judge(harness: Harness) -> Outcome:
-    payload = harness.ask_json("Чем полезна неизменяемость данных?",
-                               "--config", "reviewer", "--set", "judge.max_tokens=120")
+    options = ["--config", "reviewer", "--set", "judge.max_tokens=150"]
+    if harness.live:
+        # Судья в конфиге назван отдельным агентом со своей моделью, и флаги
+        # его не касаются — иначе он ушёл бы к другому провайдеру.
+        options += ["--set", "judge.agent.provider=" + harness.provider,
+                    "--set", "judge.agent.model=" + harness.model]
+    payload = harness.ask_json("Чем полезна неизменяемость данных?", *options)
     scores = payload.get("scores") or {}
     if not harness.live:
         return Outcome(None, "заглушка не отвечает по форме оценщика — {}".format(
@@ -300,7 +366,8 @@ def resume(harness: Harness) -> Outcome:
     files = harness.sessions()
     if not files:
         return Outcome(False, "сессия не сохранилась")
-    shown = harness.run("--continue", script="/history\n/exit\n", check=True).stdout
+    shown = flat(harness.run("--continue", script="/history\n/exit\n",
+                             check=True).stdout)
     saved = json.loads(files[-1].read_text(encoding="utf-8"))
     return Outcome("Возвращаюсь в сессию" in shown and "Влад" in shown
                    and saved["config"]["api_key"] is None,
@@ -321,8 +388,8 @@ def continue_ask(harness: Harness) -> Outcome:
 
 @scenario("под-агент", "вызов под-агента из диалога и возврат итога")
 def subagent(harness: Harness) -> Outcome:
-    shown = harness.run(script="/agent frugal max_tokens=120 -- Что такое хороший код\n"
-                               "/stats\n/exit\n", check=True).stdout
+    shown = flat(harness.run(script="/agent frugal max_tokens=120 -- Что такое хороший код\n"
+                                    "/stats\n/exit\n", check=True).stdout)
     marks = ["⤷ Под-агент frugal" in shown,
              "своя память, отдельный процесс" in shown,
              "В памяти: итог под-агента" in shown or "принят в память" in shown,
@@ -333,29 +400,35 @@ def subagent(harness: Harness) -> Outcome:
 
 @scenario("под-агент", "у под-агента своя сессия и свой конфиг")
 def subagent_isolated(harness: Harness) -> Outcome:
-    shown = harness.run(script="/agent frugal model=gpt-5.4 -- Коротко о неизменяемости\n"
-                               "/exit\n", check=True).stdout
-    own_model = "gpt-5.4 " in shown or "gpt-5.4\n" in shown
-    return Outcome(own_model and "своя память" in shown,
-                   "под-агент отвечал своей моделью, заданной правкой")
+    # Модель без провайдера сменить нельзя: конфиг frugal назван у OpenAI, и
+    # модель другого провайдера он справедливо отвергнет.
+    tweaks = "model=" + harness.other_model()
+    if harness.live:
+        tweaks = "provider={} ".format(harness.provider) + tweaks
+    shown = flat(harness.run(
+        script="/agent frugal {} -- Коротко о неизменяемости\n/exit\n".format(tweaks),
+        check=True).stdout)
+    ok = harness.other_model() in shown and "своя память" in shown
+    return Outcome(ok, "под-агент отвечал моделью {}, заданной правкой".format(
+        harness.other_model()) if ok else "правка не применилась: " + shown[-140:])
 
 
 @scenario("бюджет", "потолок трат останавливает запрос")
 def budget(harness: Harness) -> Outcome:
-    harness.run("--set", "budget.max_requests=1", script="раз\nдва\n/exit\n", check=True)
-    shown = harness.run("--set", "budget.max_requests=1",
-                        script="раз\nдва\n/exit\n", check=True).stdout
+    shown = flat(harness.run("--set", "budget.max_requests=1",
+                             script="раз\nдва\n/exit\n", check=True).stdout)
     return Outcome("лимит запросов" in shown, "второй запрос остановлен лимитом")
 
 
 @scenario("бюджет", "потолок денег не даёт уйти даже первому запросу")
 def cost_ceiling(harness: Harness) -> Outcome:
     """Потолок ниже цены запроса обязан защищать заранее, а не после траты."""
-    finished = harness.run("--max-cost", "0.0000001", "--ask", "Привет", "--json")
-    payload = json.loads(finished.stdout)
+    if harness.free_tariff:
+        return Outcome(None, "у бесплатного тарифа цена запроса нулевая, "
+                             "и потолку трат нечего останавливать")
+    payload = harness.ask_json("Привет", "--max-cost", "0.0000001", allow_failure=True)
     stopped = not payload["ok"] and "будет превышен" in payload.get("error", "")
-    allowed = json.loads(harness.run("--max-cost", "1.0", "--ask", "Привет",
-                                     "--json").stdout)
+    allowed = harness.ask_json("Привет", "--max-cost", "1.0")
     return Outcome(stopped and allowed["ok"],
                    "малый потолок остановил, щедрый пропустил (${:.6f})".format(
                        allowed.get("cost") or 0.0))
@@ -377,10 +450,11 @@ def bad_values(harness: Harness) -> Outcome:
 
 @scenario("параметры", "каждый именованный флаг доезжает до конфига")
 def every_flag(harness: Harness) -> Outcome:
-    payload = harness.ask_json("Привет", "--model", "gpt-5.4-nano", "--max-tokens", "64",
+    other = harness.other_model()
+    payload = harness.ask_json("Привет", "--model", other, "--max-tokens", "64",
                                "--name", "черновик", "--temperature", "0.1",
                                "--no-history", "--set", "attempts=2")
-    marks = [payload["model"] == "gpt-5.4-nano", payload["agent"] == "черновик",
+    marks = [payload["model"] == other, payload["agent"] == "черновик",
              payload["ok"], payload["usage"]["requests"] == 1]
     return Outcome(all(marks), "модель {} · агент {} · запросов {}".format(
         payload["model"], payload["agent"], payload["usage"]["requests"]))
@@ -409,13 +483,24 @@ def failures(harness: Harness) -> Outcome:
 # Прогон
 # --------------------------------------------------------------------------
 
-def confirm_live(console: Console, count: int) -> bool:
+def confirm_live(console: Console, count: int, provider, model: str) -> bool:
+    """Спросить, если прогон стоит денег. Бесплатный тариф не спрашивает."""
+    if provider.free:
+        console.print(Panel(
+            Text.from_markup(
+                "Живой прогон: примерно [bold]{}[/] настоящих запросов к "
+                "[bold]{}[/] ([green]бесплатный тариф[/]), модель {}.".format(
+                    count, provider.name, model)),
+            title="Живой прогон", border_style="green", box=box.ROUNDED))
+        return True
+
     console.print(Panel(
         Text.from_markup(
-            "Живой режим отправит примерно [bold]{}[/] настоящих запросов к OpenAI.\n"
-            "По ценам gpt-5.4-mini и gpt-5.4-nano это единицы центов, но это "
-            "настоящие деньги.\n"
-            "[dim]Без --live те же сценарии идут на заглушке и бесплатны.[/]".format(count)),
+            "Живой режим отправит примерно [bold]{}[/] настоящих запросов к "
+            "[bold]{}[/], модель {} — и это [bold]платно[/].\n"
+            "[dim]У бесплатного тарифа спрашивать не надо: "
+            "--provider groq или --provider openrouter.[/]".format(
+                count, provider.name, model)),
         title="⚠ Платный прогон", border_style="red", box=box.ROUNDED))
     try:
         return input("Продолжить? [y/N]: ").strip().lower() in ("y", "yes", "д", "да")
@@ -426,7 +511,12 @@ def confirm_live(console: Console, count: int) -> bool:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Живая проверка агента")
     parser.add_argument("--live", action="store_true",
-                        help="настоящие запросы к API — ПЛАТНО")
+                        help="настоящие запросы к API")
+    parser.add_argument("--provider", default="groq", metavar="КЛЮЧ",
+                        help="провайдер живого прогона (по умолчанию groq — "
+                             "бесплатный тариф)")
+    parser.add_argument("--model", default="", metavar="ИМЯ",
+                        help="модель живого прогона; по умолчанию штатная у провайдера")
     parser.add_argument("--only", default="", metavar="СЛОВО",
                         help="только сценарии, чьё имя или требование содержит слово")
     parser.add_argument("--yes", action="store_true", help="не спрашивать про --live")
@@ -438,11 +528,21 @@ def main(argv=None) -> int:
         chosen = [s for s in chosen if not s.live_only]
 
     console = Console(highlight=False)
-    if args.live and not args.yes and not confirm_live(console, len(chosen) * 3):
-        console.print("[dim]Отменено — денег не потрачено.[/]")
-        return 0
+    provider_key, model_id = "", ""
+    if args.live:
+        from llmagent.transport import PROVIDERS
 
-    harness = Harness(args.live, console)
+        provider = PROVIDERS.get(args.provider)
+        if provider is None:
+            console.print("[red]Неизвестный провайдер «{}»[/]".format(args.provider))
+            return 2
+        provider_key = provider.key
+        model_id = args.model or provider.default_model.id
+        if not args.yes and not confirm_live(console, len(chosen) * 3, provider, model_id):
+            console.print("[dim]Отменено — денег не потрачено.[/]")
+            return 0
+
+    harness = Harness(args.live, console, provider_key, model_id)
     table = Table(box=box.SIMPLE_HEAVY, expand=True, pad_edge=False)
     table.add_column("№", justify="right", style="dim", no_wrap=True)
     table.add_column("Треб.", no_wrap=True, style="dim")
@@ -472,11 +572,14 @@ def main(argv=None) -> int:
         harness.cleanup()
 
     elapsed = time.perf_counter() - started
+    throttled = ("\n[dim]Отказов по частоте тарифа: {} — переждали и "
+                 "повторили.[/]".format(harness.throttled) if harness.throttled else "")
     summary = Text.from_markup(
         "\n[green]{}[/] сошлось · [red]{}[/] не сошлось · [yellow]{}[/] неприменимо "
-        "здесь · {:.1f} с\n[dim]Режим: {}[/]".format(
-            passed, failed, skipped, elapsed,
-            "настоящий API" if args.live else "заглушка, денег не потрачено"))
+        "здесь · {:.1f} с{}\n[dim]Режим: {}[/]".format(
+            passed, failed, skipped, elapsed, throttled,
+            "настоящий API · {} · {}".format(provider_key, model_id) if args.live
+            else "заглушка, денег не потрачено"))
     console.print(Panel(Group(table, summary), title="🔬 Живая проверка агента",
                         title_align="left",
                         border_style="green" if not failed else "red",
