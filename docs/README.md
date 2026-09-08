@@ -27,4 +27,6 @@
 Рядом лежат два файла не про ветку, а про задание дня 6:
 [day6-agent-requirements.md](day6-agent-requirements.md) — требования ментора
 одним списком и проверка прежнего состояния,
-[day6-agent-plan.md](day6-agent-plan.md) — план, его ревью и условия приёмки.
+[day6-agent-plan.md](day6-agent-plan.md) — план, его ревью и условия приёмки,
+[plan-config-overrides.md](plan-config-overrides.md) — план по передаче параметров
+из командной строки, сверенный с тем, как это устроено в Claude Code.
