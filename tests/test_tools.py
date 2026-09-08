@@ -243,3 +243,41 @@ def test_forgotten_toolbox_is_not_blamed_on_the_config():
         Agent(AgentConfig(tools=ToolPolicy(enabled=("spawn_agent",)),
                           transport=FAST_DEMO), client=ScriptedClient("ответ"))
     assert "вызывающий их не передал" in str(info.value)
+
+
+# --------------------------------------------------------------------------
+# Подсказки на частые ошибки набора
+# --------------------------------------------------------------------------
+
+def test_the_word_order_is_always_recalled():
+    """«/agent <вопрос>» читается естественно, и ошибиться так проще всего.
+
+    Прежде такой ввод давал панель «под-агент "Какие не справился» и перечень
+    конфигов — из него человек не понимал, что дело в порядке слов.
+    """
+    from llmagent import ConfigError
+    from llmchat.subagent import resolve_config
+
+    for name in ("Какие", "нет-такого"):
+        with pytest.raises(ConfigError) as info:
+            resolve_config(name)
+        text = str(info.value)
+        assert "нет конфига «{}»".format(name) in text
+        assert "/agent <конфиг> <вопрос>" in text
+        assert "frugal" in text
+
+
+def test_a_typo_in_the_config_name_gets_a_suggestion():
+    from llmagent import ConfigError
+    from llmchat.subagent import resolve_config
+
+    with pytest.raises(ConfigError) as info:
+        resolve_config("frugla")
+    assert "«frugal»" in str(info.value)
+
+
+def test_quotes_around_the_config_name_are_ignored():
+    from llmchat.subagent import resolve_config, split_request
+
+    assert resolve_config('"frugal"').stem == "frugal"
+    assert split_request('"frugal" Что такое код') == ("frugal", [], "Что такое код")

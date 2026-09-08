@@ -537,6 +537,12 @@ def delegate(console: Console, session: Session, argument: str) -> RenderableTyp
     name, tweaks, question = subagent.split_request(argument)
     if not name:
         return subagent.catalog_panel()
+    try:
+        # Имя проверяем до запуска процесса: «не справился» — неверная подпись
+        # для того, что даже не начиналось.
+        subagent.resolve_config(name)
+    except ConfigError as exc:
+        return error_panel(str(exc))
     if not question:
         return error_panel("Нечего спрашивать. Нужно: /agent {} <вопрос>, "
                            "либо /agent {} поле=значение -- <вопрос>".format(name, name))

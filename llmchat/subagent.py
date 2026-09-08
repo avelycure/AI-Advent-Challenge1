@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import difflib
 import re
 import subprocess
 import sys
@@ -86,12 +87,32 @@ def available() -> List[str]:
 
 def resolve_config(name: str) -> pathlib.Path:
     """Короткое имя из configs/ либо путь к файлу как он задан."""
-    for candidate in (CONFIGS_DIR / (name + ".yaml"), CONFIGS_DIR / (name + ".yml"),
-                      pathlib.Path(name).expanduser()):
+    wanted = name.strip().strip('"\'«»')
+    for candidate in (CONFIGS_DIR / (wanted + ".yaml"), CONFIGS_DIR / (wanted + ".yml"),
+                      pathlib.Path(wanted).expanduser()):
         if candidate.is_file():
             return candidate
-    raise ConfigError("нет конфига «{}». Доступны: {}".format(
-        name, ", ".join(available()) or "ни одного"))
+    raise ConfigError(complain_about(wanted))
+
+
+def complain_about(name: str) -> str:
+    """Объяснить, что не так с именем конфига.
+
+    Одно сообщение на все случаи, без угадывания намерений. Порядок слов
+    напоминается всегда: запись «/agent <вопрос>» читается естественно, и
+    ошибиться так проще всего — а перечень конфигов сам по себе этого
+    не объясняет.
+    """
+    names = available()
+    close = difflib.get_close_matches(name.lower(), names, n=2, cutoff=0.6)
+    suggestion = (". Может быть, {}?".format(
+        " или ".join("«{}»".format(item) for item in close)) if close else ".")
+    return "\n".join([
+        "нет конфига «{}»{}".format(name, suggestion),
+        "Доступны: {}".format(", ".join(names) or "ни одного"),
+        "Порядок: /agent <конфиг> <вопрос> — первое слово это имя конфига, "
+        "а не начало вопроса.",
+    ])
 
 
 # --------------------------------------------------------------------------
@@ -130,6 +151,9 @@ def split_request(argument: str) -> Tuple[str, List[str], str]:
     возможности не набирать два знака.
     """
     name, _, tail = argument.strip().partition(" ")
+    # Кавычки вокруг имени снимаем сразу: человек их ставит по привычке, а
+    # дальше они попадали и в поиск конфига, и в подпись панели.
+    name = name.strip('"\'«»')
     marker = SEPARATOR.search(tail)
     if marker is None:
         return name, [], tail.strip()
