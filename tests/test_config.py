@@ -131,3 +131,28 @@ def test_shipped_configs_load_and_resolve(path):
     provider, model = config.resolve()
     assert provider.key == config.provider
     assert model.id == config.model
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS_DIR.glob("*.yaml")),
+                         ids=lambda p: p.name)
+def test_shipped_configs_actually_answer(path):
+    """Загрузиться мало — конфиг должен доводить запрос до ответа.
+
+    Проверка появилась после того, как configs/reviewer.yaml пролежал битым:
+    YAML разбивал описания признаков судьи по запятым, конфиг при этом
+    прекрасно загружался, а падал только при первом ответе.
+    """
+    from llmagent import Agent, Transport
+
+    from conftest import ScriptedClient
+
+    config = AgentConfig.from_file(str(path)).with_changes(
+        transport=Transport(demo=True, demo_delay=0.0))
+    # Второй ответ — на случай судьи или переспроса по выходной политике.
+    agent = Agent(config, client=ScriptedClient(
+        ['{"items": []}', "полнота: 4\nясность: 4\nобоснованность: 4"]))
+    result = agent.ask("Проверочный вопрос")
+    assert result.text
+    assert agent.usage.requests >= 1
+    if config.judge is not None:
+        assert result.scores or result.judge_note

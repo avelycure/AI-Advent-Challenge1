@@ -118,18 +118,18 @@ def test_configs_can_come_from_files(tmp_path):
     assert all(r.error is None for r in results)
 
 
-def test_the_mentor_check_script_runs_and_reports():
+def test_the_mentor_check_script_runs_and_reports(tmp_path):
     """Сам ./spawn.sh обязан работать: на него ссылается описание задания."""
     import subprocess
     import sys
     import pathlib
 
+    from conftest import child_env
+
     root = pathlib.Path(__file__).resolve().parent.parent
     finished = subprocess.run(
         [sys.executable, "spawn_demo.py", "--agents", "100", "--rows", "3"],
-        cwd=str(root), capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin", "COLUMNS": "120", "TERM": "dumb",
-             "PYTHONPATH": str(root)})
+        cwd=str(root), capture_output=True, text=True, env=child_env(tmp_path))
     assert finished.returncode in (0, 1), finished.stderr[-2000:]
     assert "100 агентов" in finished.stdout
     assert "Ответили" in finished.stdout

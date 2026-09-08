@@ -13,10 +13,11 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from rich import box
 from rich.console import Group, RenderableType
@@ -24,7 +25,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from llmagent import AgentConfig, ConfigError
+from llmagent import AgentConfig, ConfigError, overrides
 from llmagent.registry import EXTRA_ENV
 
 from .ui import fmt, format_cost, format_seconds
@@ -107,7 +108,34 @@ def child_environment(parent: AgentConfig, child: AgentConfig) -> Dict[str, str]
     return environment
 
 
-def run(name: str, question: str, parent: AgentConfig) -> Delegation:
+# Одиночные два дефиса — там, где до них и после них пробел или край строки.
+# Внутри вопроса такая последовательность попадаться может, и разделителем
+# считается только первая: «/agent frugal -- вопрос с -- внутри» не должен
+# терять хвост вопроса.
+SEPARATOR = re.compile(r"(?:^|\s)--(?:\s|$)")
+
+
+def split_request(argument: str) -> Tuple[str, List[str], str]:
+    """Разобрать «имя правка=значение … -- вопрос».
+
+    Без ``--`` всё после имени остаётся вопросом: привычное поведение важнее
+    возможности не набирать два знака.
+    """
+    name, _, tail = argument.strip().partition(" ")
+    marker = SEPARATOR.search(tail)
+    if marker is None:
+        return name, [], tail.strip()
+
+    tweaks = tail[:marker.start()].split()
+    if any("=" not in item for item in tweaks):
+        # Похоже, что «--» просто попались в тексте вопроса: правки выглядят
+        # как поле=значение, и если хоть одна не выглядит — это не правки.
+        return name, [], tail.strip()
+    return name, tweaks, tail[marker.end():].strip()
+
+
+def run(name: str, question: str, parent: AgentConfig,
+        tweaks: Optional[List[str]] = None) -> Delegation:
     """Запустить под-агента и вернуть его итог.
 
     Ни одно исключение наружу не летит: сорванный под-агент — это результат
@@ -116,11 +144,17 @@ def run(name: str, question: str, parent: AgentConfig) -> Delegation:
     try:
         path = resolve_config(name)
         child = AgentConfig.from_file(str(path))
+        # Правки проверяем здесь, а не в дочернем процессе: понятную ошибку
+        # про опечатку в поле надо показать сразу, а не через запуск и разбор.
+        if tweaks:
+            child = overrides.apply(child, tweaks)
     except ConfigError as exc:
         return Delegation(name, question, error=str(exc))
 
     command = [sys.executable, str(ENTRY_POINT), "--config", str(path),
                "--ask", question, "--json"]
+    for tweak in tweaks or []:
+        command += ["--set", tweak]
     # Родитель в демонстрационном режиме — значит и под-агент тоже: иначе
     # проверочный прогон внезапно ушёл бы в сеть и потратил деньги.
     if parent.transport.demo and not child.transport.demo:
@@ -232,7 +266,9 @@ def catalog_panel() -> RenderableType:
 
     hint = Text.from_markup(
         "\n[cyan]/agent books-json Книги Нассима Талеба[/][dim] — запустить под-агента[/]\n"
-        "[dim]Под-агент идёт отдельным процессом: своя сессия, своя память, "
+        "[cyan]/agent frugal temperature=0.1 max_tokens=80 -- Что такое хороший код[/]\n"
+        "[dim]До[/] [bold]--[/][dim] правки конфига, после — вопрос.\n"
+        "Под-агент идёт отдельным процессом: своя сессия, своя память, "
         "свои счётчики. Его ответ вернётся сюда и попадёт в память этой сессии.[/]")
     return Panel(Group(table, hint), title="⤷ Под-агенты", title_align="left",
                  border_style="cyan", box=box.ROUNDED, padding=(0, 1))

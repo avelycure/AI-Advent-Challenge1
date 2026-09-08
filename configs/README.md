@@ -13,6 +13,13 @@ from llmagent import Agent, AgentConfig
 agent = Agent(AgentConfig.from_file("configs/books-json.yaml"))
 ```
 
+Любое поле конфига можно поправить прямо в команде запуска, не трогая файл:
+
+```bash
+./run.sh --config frugal --temperature 0.1 --set output.max_attempts=3
+./run.sh --config '{"model": "gpt-5.4-nano"}'      # вообще без файла
+```
+
 Ключ в конфиге не хранится: поле `api_key` оставлено пустым, и агент берёт
 реквизит из переменной окружения провайдера или из файла рядом. Команда
 `/config` в чате печатает действующий конфиг — ключ в выводе заменён на `***`.

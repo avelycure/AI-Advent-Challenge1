@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import pathlib
 import time
 from typing import Dict, List, Optional
 
@@ -13,6 +14,8 @@ import pytest
 
 from llmagent import AgentConfig, Transport
 from llmagent.transport import Completion, count_message_tokens, count_text_tokens
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class ScriptedClient:
@@ -50,6 +53,50 @@ class FailingClient:
 
     def complete(self, *args, **kwargs):
         raise self.error
+
+
+# --------------------------------------------------------------------------
+# Дочерние процессы
+# --------------------------------------------------------------------------
+
+REAL_SESSIONS = pathlib.Path("~/.llm-agent").expanduser()
+
+
+def child_env(home) -> Dict[str, str]:
+    """Окружение дочернего процесса тестов. Домашний каталог обязателен.
+
+    Обязателен он потому, что этот параметр забыли дважды и дважды поплатились.
+    Окружение задаётся с нуля, поэтому переменные вида ``*_API_KEY`` в него не
+    попадают — но ``HOME`` Python восстанавливает из системной записи
+    пользователя, и без подмены агент находит настоящий ключ в ``~/.openai-key``
+    и уходит в платный запрос, а сессии пишет в настоящий ``~/.llm-agent``.
+    """
+    if home is None:
+        raise AssertionError("дочернему процессу нужен свой домашний каталог: "
+                             "передайте tmp_path")
+    return {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(ROOT), "TERM": "dumb",
+            "COLUMNS": "120", "HOME": str(home)}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def real_home_stays_clean():
+    """Караул у настоящего каталога сессий.
+
+    Ни один тест не должен оставить в нём следа. Проверка сделана сторожем, а
+    не памяткой: забыть подменить домашний каталог легко, а заметить чужой
+    файл в своём каталоге сессий — трудно.
+    """
+    def snapshot():
+        if not REAL_SESSIONS.is_dir():
+            return None
+        return sorted(path.name for path in REAL_SESSIONS.rglob("*"))
+
+    before = snapshot()
+    yield
+    after = snapshot()
+    assert after == before, (
+        "тесты изменили настоящий каталог сессий {}: было {}, стало {}".format(
+            REAL_SESSIONS, before, after))
 
 
 @pytest.fixture

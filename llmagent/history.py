@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Dict, List, Optional
 
 from .transport import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
 
@@ -115,6 +115,31 @@ class Conversation:
     @property
     def exchanges(self) -> int:
         return sum(1 for m in self.messages if m.role == "assistant")
+
+    # --- сохранение -----------------------------------------------------
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "keep_last_answer": self.keep_last_answer,
+            "exact_context": self.exact_context,
+            "exact_upto": self.exact_upto,
+            "messages": [asdict(message) for message in self.messages],
+        }
+
+    @classmethod
+    def restore(cls, payload: Dict[str, Any]) -> "Conversation":
+        """Собрать переписку из сохранённого вида.
+
+        Незнакомые поля сообщений пропускаются: файл мог быть записан прежней
+        версией программы, и терять из-за этого весь диалог не стоит.
+        """
+        known = {f.name for f in fields(Message)}
+        conversation = cls(keep_last_answer=bool(payload.get("keep_last_answer", True)))
+        conversation.exact_context = int(payload.get("exact_context", 0) or 0)
+        conversation.exact_upto = int(payload.get("exact_upto", 0) or 0)
+        for item in payload.get("messages", []):
+            conversation.messages.append(
+                Message(**{k: v for k, v in item.items() if k in known}))
+        return conversation
 
 
 def keep_last_answer(messages: List[Message]) -> List[Message]:

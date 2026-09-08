@@ -34,8 +34,11 @@ from .errors import (
 from .formats import FORMATS, FREE_FORMAT, STOP_MARKER, Check, Field, Schema, Validation
 from .history import Conversation, Message
 from .params import GenerationParams
+from .catalog import find_model
+from .overrides import append_system_prompt
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
+from .store import SessionNotFound, SessionRecord, SessionStore, restore_agent
 from .spawn import build_agents, matrix, spawn, spawn_sync, summarize
 from .usage import UsageMeter
 
@@ -48,6 +51,8 @@ __all__ = [
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",
     "Conversation", "Message", "UsageMeter",
     "ClientRegistry", "Credentials", "SHARED", "resolve_credentials",
+    "SessionStore", "SessionRecord", "SessionNotFound", "restore_agent",
+    "find_model", "append_system_prompt",
     "spawn", "spawn_sync", "build_agents", "matrix", "summarize",
     "AgentError", "ConfigError", "MissingCredentials", "InputRejected",
     "OutputRejected", "BudgetExceeded", "LLMError",

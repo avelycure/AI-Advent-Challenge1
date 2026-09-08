@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union, get_args, get_origin, get_type_hints
 
 from . import formats
 from .errors import ConfigError
@@ -119,6 +119,18 @@ class JudgeConfig:
     # Порог годности: средняя оценка ниже — ответ помечается как слабый.
     min_mean: Optional[float] = None
     agent: Optional["AgentConfig"] = None
+
+    def __post_init__(self) -> None:
+        if not self.criteria:
+            raise ConfigError("judge.criteria: нужен хотя бы один признак")
+        for item in self.criteria:
+            if len(item) != 2:
+                raise ConfigError(
+                    "judge.criteria: признак — пара «имя, что оценивать», "
+                    "а получено {} значений: {}. В YAML описание с запятыми "
+                    "нужно взять в кавычки".format(len(item), list(item)[:3]))
+        if self.scale < 2:
+            raise ConfigError("judge.scale: шкала меньше двух баллов бессмысленна")
 
 
 @dataclass(frozen=True)
@@ -306,6 +318,59 @@ _NESTED: Dict[str, Any] = {
     "schema": formats.Schema,
     "agent": "AgentConfig",
 }
+
+
+def field_type(path: str) -> Optional[type]:
+    """Объявленный тип поля по пути внутрь конфига. None — путь неизвестен.
+
+    Тип нужен разбору правок из командной строки. Смотреть на текущее значение
+    нельзя: у строковых полей вроде ``input.template`` по умолчанию лежит
+    пустое значение, и по нему поле не отличить от числового.
+    """
+    holder: Any = AgentConfig
+    segments = [part for part in path.split(".") if part]
+    for index, segment in enumerate(segments):
+        if not (is_dataclass(holder) and isinstance(holder, type)):
+            return None
+        try:
+            hints = get_type_hints(holder)
+        except Exception:  # noqa: BLE001 — незнакомая аннотация не повод падать
+            return None
+        if segment not in hints:
+            return None
+        annotation = _unwrap_optional(hints[segment])
+        if index == len(segments) - 1:
+            return annotation if isinstance(annotation, type) else None
+        holder = annotation
+    return None
+
+
+def _unwrap_optional(annotation: Any) -> Any:
+    """Снять Optional: для разбора значения важен тип, а не его допустимая пустота."""
+    if get_origin(annotation) is Union:
+        actual = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(actual) == 1:
+            return actual[0]
+    return annotation
+
+
+def section_names() -> Tuple[str, ...]:
+    """Имена вложенных разделов конфига — те, внутрь которых можно углубляться."""
+    return tuple(_NESTED)
+
+
+def default_section(name: str) -> Optional[Dict[str, Any]]:
+    """Раздел конфига со значениями по умолчанию, словарём.
+
+    Нужен для правок вида ``judge.min_mean=4``, когда судьи ещё нет: раздел
+    создаётся целиком из умолчаний, и правка ложится в него.
+    """
+    target = _NESTED.get(name)
+    if target is None:
+        return None
+    if target == "AgentConfig":
+        target = AgentConfig
+    return _to_plain(target())
 
 
 def _restore(name: str, annotation: Any, value: Any) -> Any:

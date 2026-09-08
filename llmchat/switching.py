@@ -188,6 +188,15 @@ class CredentialStore:
     def has(self, provider: ProviderInfo) -> bool:
         return provider.key in self._known
 
+    def remember(self, provider: ProviderInfo, credentials: Credentials) -> None:
+        """Запомнить уже известные реквизиты провайдера.
+
+        Нужно на запуске с готовым конфигом: ключ там уже есть, и если о нём
+        не сказать, первое же переключение модели внутри того же провайдера
+        станет спрашивать ключ заново.
+        """
+        self._known.setdefault(provider.key, credentials)
+
     def ready_for(self, console: Console, provider: ProviderInfo,
                   step: Optional[int] = None) -> Credentials:
         """Реквизиты провайдера: из памяти либо спрошенные и проверенные.

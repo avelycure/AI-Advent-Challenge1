@@ -12,8 +12,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Dict, Optional
 
 from .errors import BudgetExceeded
 from .transport import ModelInfo, ProviderInfo, request_cost
@@ -156,6 +156,26 @@ class UsageMeter:
             if spent >= budget.max_cost:
                 raise BudgetExceeded("исчерпан денежный лимит: {:.4f} из {:.4f}".format(
                     spent, budget.max_cost))
+
+    # --- сохранение ----------------------------------------------------
+    def to_dict(self) -> Dict[str, Any]:
+        """Полный вид счётчиков — в отличие от ``snapshot``, восстановимый."""
+        return {
+            "by_kind": {kind: asdict(spent) for kind, spent in self.by_kind.items()
+                        if spent.requests},
+            "costs": dict(self.costs),
+            "unpriced_requests": self.unpriced_requests,
+        }
+
+    @classmethod
+    def restore(cls, payload: Dict[str, Any]) -> "UsageMeter":
+        meter = cls()
+        known = {f.name for f in fields(Spent)}
+        for kind, spent in (payload.get("by_kind") or {}).items():
+            meter.by_kind[kind] = Spent(**{k: v for k, v in spent.items() if k in known})
+        meter.costs = dict(payload.get("costs") or {})
+        meter.unpriced_requests = int(payload.get("unpriced_requests", 0) or 0)
+        return meter
 
     def snapshot(self) -> Dict[str, object]:
         """Плоская сводка — для отчётов, тестов и тела HTTP-ответа."""

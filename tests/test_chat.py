@@ -15,7 +15,7 @@ import pytest
 from llmagent import Agent, AgentConfig, GenerationParams, Transport
 from llmchat.session import DEFAULT_TOPIC, Session
 
-from conftest import ScriptedClient
+from conftest import ScriptedClient, child_env
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -84,8 +84,7 @@ def test_chat_runs_from_start_to_exit(tmp_path, script, expect):
     finished = subprocess.run(
         [sys.executable, "chat.py", "--config", str(config)],
         cwd=str(ROOT), input=script, capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin", "COLUMNS": "120", "TERM": "dumb",
-             "PYTHONPATH": str(ROOT)})
+        env=child_env(tmp_path))
     assert finished.returncode == 0, finished.stderr[-2000:]
     assert expect in finished.stdout
     assert "Traceback" not in finished.stderr
