@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, List, Optional
 
 from . import judge as judging
@@ -20,14 +21,15 @@ from .history import Conversation
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .transport import Completion, count_message_tokens
-from .usage import JUDGE, MAIN, REPAIR, SIDE, UsageMeter
+from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, UsageMeter
 
 
 class Agent:
     """Один агент — один конфиг, одна история, один счётчик расхода."""
 
     def __init__(self, config: AgentConfig = DEFAULT_CONFIG, *,
-                 registry: Optional[ClientRegistry] = None, client: Any = None) -> None:
+                 registry: Optional[ClientRegistry] = None, client: Any = None,
+                 session_id: Optional[str] = None) -> None:
         # Проверяем конфиг сразу: неверный провайдер должен обнаружиться при
         # создании агента, а не на первом запросе где-то в глубине транспорта.
         config.resolve()
@@ -36,6 +38,9 @@ class Agent:
         # Готовый клиент передают тесты и вызывающие, у которых он уже есть.
         self._client = client
         self._credentials: Optional[Credentials] = None
+        # Своя сессия у каждого агента: память одного никак не пересекается
+        # с памятью другого, и по идентификатору их видно на экране и в отчёте.
+        self.session_id = session_id or uuid.uuid4().hex[:8]
         self.usage = UsageMeter()
         self.conversation = Conversation(keep_last_answer=config.history.keep_last_answer)
         self._judge_agent: Optional["Agent"] = None
@@ -362,6 +367,25 @@ class Agent:
         self.usage.absorb(self._judge_agent.usage)
         self._judge_agent.usage = UsageMeter()
         return completion
+
+    def record_delegation(self, name: str, question: str, answer: str):
+        """Принять в память сессии ответ под-агента.
+
+        Под-агент — отдельная сессия со своей памятью, и его переписки мы не
+        видим. В родительскую память попадает только итог, и попадает явно
+        помеченным: дальше модель сможет на него ссылаться, но не спутает
+        его со своим собственным ответом.
+        """
+        note = ("[под-агент {}] Ему был задан вопрос: {}\n\n"
+                "Он ответил:\n{}".format(name, question, answer))
+        return self.conversation.add_note(note, model=name)
+
+    def absorb_delegation(self, prompt_tokens: int, completion_tokens: int,
+                          seconds: float = 0.0, cost: Optional[float] = None,
+                          currency: str = "USD") -> None:
+        """Учесть расход под-агента в счётчике этой сессии."""
+        self.usage.record_external(prompt_tokens, completion_tokens, seconds,
+                                   cost, currency, kind=SUB)
 
     def record_side(self, completion: Completion) -> None:
         """Учесть расход на служебный запрос, сделанный вызывающим.

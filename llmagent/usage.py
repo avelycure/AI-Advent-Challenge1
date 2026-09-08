@@ -22,8 +22,9 @@ MAIN = "основной"
 REPAIR = "переспрос"
 JUDGE = "оценка"
 SIDE = "служебный"
+SUB = "под-агент"
 
-KINDS = (MAIN, REPAIR, JUDGE, SIDE)
+KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB)
 
 
 @dataclass
@@ -69,6 +70,26 @@ class UsageMeter:
         else:
             self.costs[model.currency] = self.costs.get(model.currency, 0.0) + cost
         return cost
+
+    def record_external(self, prompt_tokens: int, completion_tokens: int,
+                        seconds: float = 0.0, cost: Optional[float] = None,
+                        currency: str = "USD", kind: str = SUB,
+                        requests: int = 1) -> None:
+        """Учесть расход, случившийся вне этого процесса.
+
+        Под-агент живёт отдельным процессом, и объекта ``Completion`` у нас
+        на руках нет — приходят только числа из его ответа. Не учитывать их
+        значило бы соврать в итоговой цене: платил тот же кошелёк.
+        """
+        spent = self.by_kind.setdefault(kind, Spent())
+        spent.requests += requests
+        spent.prompt_tokens += prompt_tokens
+        spent.completion_tokens += completion_tokens
+        spent.seconds += seconds
+        if cost is None:
+            self.unpriced_requests += requests
+        else:
+            self.costs[currency] = self.costs.get(currency, 0.0) + cost
 
     def absorb(self, other: "UsageMeter") -> None:
         """Вобрать расход другого счётчика — например, судьи со своей моделью."""

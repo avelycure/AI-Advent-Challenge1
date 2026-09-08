@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -18,6 +19,11 @@ from typing import Dict, Optional, Tuple
 from .config import AgentConfig
 from .errors import MissingCredentials
 from .transport import ProviderInfo, find_sources, make_client
+
+# Второй реквизит провайдера (у Яндекса — каталог) обычно лежит в файле, но
+# дочернему процессу его удобнее передать окружением: в argv он был бы виден
+# в выводе ps, а заводить файл на один вызов ни к чему.
+EXTRA_ENV = "LLM_AGENT_API_EXTRA"
 
 
 @dataclass(frozen=True)
@@ -48,7 +54,7 @@ def resolve_credentials(config: AgentConfig) -> Credentials:
                     " либо ".join(provider.key_files) or "файл рядом"))
         key, source = sources[0].value, sources[0].label
 
-    extra = config.api_extra
+    extra = config.api_extra or os.environ.get(EXTRA_ENV) or None
     if provider.extra_field is not None and not extra:
         found = find_sources(None, provider.extra_field.files)
         if not found:

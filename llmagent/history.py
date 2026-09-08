@@ -27,6 +27,9 @@ class Message:
     reasoning_tokens: int = 0
     cost: Optional[float] = None
     cost_currency: str = "USD"
+    # Заметка — сообщение, которое не спрашивал пользователь и не писала
+    # модель: например, ответ под-агента, принятый в память сессии.
+    note: bool = False
 
 
 @dataclass
@@ -48,6 +51,17 @@ class Conversation:
 
     def add_assistant(self, content: str, model: str = "", accent: str = "") -> Message:
         message = Message("assistant", content, model=model, accent=accent)
+        self.messages.append(message)
+        return message
+
+    def add_note(self, content: str, model: str = "", accent: str = "") -> Message:
+        """Внешнее сведение, попадающее в память сессии.
+
+        Роль ``user``, а не ``assistant``: это не ответ модели, а материал,
+        который ей дали. Провайдеры принимают два сообщения пользователя
+        подряд, и подделывать под ответ ассистента было бы неправдой.
+        """
+        message = Message("user", content, model=model, accent=accent, note=True)
         self.messages.append(message)
         return message
 

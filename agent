@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Точка входа агента. Названа коротко, чтобы её было удобно положить в PATH
+# и вызывать из любого каталога, как привычный терминальный инструмент:
+#
+#   ln -s "$(pwd)/agent" ~/.local/bin/agent
+#
+# Каждый запуск — своя сессия со своей памятью. Окружение готовится один раз.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$HERE/.venv"
+PYTHON="${PYTHON:-python3}"
+
+if [ ! -d "$VENV" ]; then
+  echo "→ Создаю виртуальное окружение…" >&2
+  "$PYTHON" -m venv "$VENV"
+fi
+
+if [ ! -f "$VENV/.deps-ok" ]; then
+  echo "→ Ставлю зависимости…" >&2
+  "$VENV/bin/python" -m pip install --upgrade pip -q
+  "$VENV/bin/pip" install -q -r "$HERE/requirements.txt"
+  "$VENV/bin/pip" install -q tiktoken 2>/dev/null || true
+  touch "$VENV/.deps-ok"
+fi
+
+exec "$VENV/bin/python" "$HERE/chat.py" "$@"

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
+import sys
 from typing import List, Optional
 
 from rich.console import Console, Group, RenderableType
@@ -26,7 +28,7 @@ from llmagent.params import SPECS, GenerationParams, apply, format_value, parse_
 from llmagent.transport import tokenizer_name
 from llmagent.usage import JUDGE, MAIN, REPAIR, SIDE
 
-from . import switching
+from . import subagent, switching
 from .session import Session
 from .ui import (
     choose_model,
@@ -75,7 +77,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--config",
         metavar="ФАЙЛ",
-        help="конфиг агента (JSON или YAML): провайдер, модель, промпт, политики",
+        help="конфиг агента: короткое имя из configs/ или путь к файлу JSON либо YAML",
+    )
+    parser.add_argument(
+        "--ask",
+        metavar="ТЕКСТ",
+        help="задать один вопрос и выйти, без диалога и без вопросов в консоль",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="с --ask: вывести итог одним объектом JSON и ничего больше",
     )
     return parser.parse_args(argv)
 
@@ -386,6 +398,9 @@ def chat_loop(console: Console, store, session: Session) -> None:
             if command == "/retry":
                 notice = retry_last(console, session)
                 continue
+            if command in ("/agent", "/agents", "/sub"):
+                notice = delegate(console, session, argument)
+                continue
             if command == "/new":
                 session.reset()
                 notice = info_panel("История очищена, контекст свободен.",
@@ -430,6 +445,33 @@ def chat_loop(console: Console, store, session: Session) -> None:
             )
 
     farewell(console, session)
+
+
+def delegate(console: Console, session: Session, argument: str) -> RenderableType:
+    """Запустить под-агента отдельным процессом и принять его итог.
+
+    Своей сессии под-агент не показывает: сюда возвращается только ответ, и он
+    ложится в память этой сессии помеченной заметкой. Расход под-агента идёт
+    в общий счёт отдельной строкой — платил тот же кошелёк.
+    """
+    name, _, question = argument.strip().partition(" ")
+    if not name:
+        return subagent.catalog_panel()
+    if not question.strip():
+        return error_panel("Нечего спрашивать. Нужно: /agent {} <вопрос>".format(name))
+
+    with console.status("[bold]под-агент {} работает в своём процессе…[/]".format(name),
+                        spinner="dots"):
+        delegation = subagent.run(name, question.strip(), session.agent.config)
+
+    if delegation.ok:
+        session.agent.record_delegation(delegation.name, delegation.question,
+                                        delegation.text)
+        session.agent.absorb_delegation(delegation.prompt_tokens,
+                                        delegation.completion_tokens,
+                                        delegation.seconds, delegation.cost,
+                                        delegation.currency)
+    return subagent.panel(delegation)
 
 
 def request_answer(console: Console, session: Session, ask=None):
@@ -499,8 +541,16 @@ def answer_notice(session: Session, result) -> Optional[RenderableType]:
 
 
 def load_base_config(path: Optional[str], demo: bool) -> AgentConfig:
-    """Конфиг из файла или встроенный по умолчанию, с поправкой на --demo."""
-    base = AgentConfig.from_file(path) if path else DEFAULT_CONFIG
+    """Конфиг из файла или встроенный по умолчанию, с поправкой на --demo.
+
+    Принимается и короткое имя из ``configs/``, и путь к файлу. Короткое имя
+    важно потому, что команду кладут в PATH и зовут из любого каталога, где
+    относительного ``configs/demo.yaml`` попросту нет.
+    """
+    if not path:
+        base = DEFAULT_CONFIG
+    else:
+        base = AgentConfig.from_file(str(subagent.resolve_config(path)))
     if demo and not base.transport.demo:
         base = base.with_changes(transport=Transport(demo=True))
     return base
@@ -528,8 +578,61 @@ def agent_from_config(console: Console, config: AgentConfig, store) -> Agent:
     return Agent(config.with_changes(api_key=credentials.key, api_extra=credentials.extra))
 
 
+def one_shot(args: argparse.Namespace) -> int:
+    """Один вопрос без диалога: этим режимом родитель вызывает под-агента.
+
+    Ни одного вопроса в консоль здесь не задаётся — процесс может быть
+    дочерним, и спрашивать некого. Не нашлось реквизитов — сразу ошибка.
+    В режиме ``--json`` в stdout уходит только объект JSON: его разбирает
+    вызывающий, и любая посторонняя строка сломала бы разбор.
+    """
+    def fail(message: str, code: int) -> int:
+        if args.json:
+            json.dump({"ok": False, "error": message}, sys.stdout, ensure_ascii=False)
+            sys.stdout.write("\n")
+        else:
+            print(message, file=sys.stderr)
+        return code
+
+    try:
+        config = load_base_config(args.config, args.demo)
+        agent = Agent(config)
+        # Реквизиты ищем сразу, а не при первом запросе: у отсутствия ключа
+        # должен быть свой код возврата, иначе вызывающий не отличит его от
+        # отказа провайдера и станет повторять безнадёжный вызов.
+        agent.credentials
+    except ConfigError as exc:
+        return fail("конфиг не принят: {}".format(exc), 2)
+    except MissingCredentials as exc:
+        return fail(str(exc), 3)
+
+    try:
+        result = agent.ask(args.ask)
+    except (InputRejected, AgentError, LLMError) as exc:
+        payload = {"ok": False, "error": str(exc), "session_id": agent.session_id}
+        if args.json:
+            json.dump(payload, sys.stdout, ensure_ascii=False)
+            sys.stdout.write("\n")
+        else:
+            print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json:
+        payload = result.to_dict()
+        payload["session_id"] = agent.session_id
+        payload["usage"] = agent.usage.snapshot()
+        json.dump(payload, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        print(result.text)
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if args.ask is not None:
+        return one_shot(args)
+
     enable_line_editing()
     console = make_console()
 

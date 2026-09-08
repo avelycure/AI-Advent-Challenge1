@@ -377,7 +377,7 @@ def build_header(session: Session) -> RenderableType:
     )
     return Panel(
         grid,
-        title="💬 Тема диалога",
+        title="💬 Сессия {}".format(session.agent.session_id),
         title_align="left",
         border_style=session.provider.accent,
         box=box.ROUNDED,
@@ -500,6 +500,17 @@ def build_stats(session: Session, width: int) -> RenderableType:
 
 def build_message(message: Message, session: Session) -> RenderableType:
     if message.role == "user":
+        if message.note:
+            # Заметку не задавал человек — это принятый в память итог
+            # под-агента, и подписывать её «Вы» было бы неправдой.
+            return Panel(
+                Text(message.content, style="dim"),
+                title="[bold green]⤷ В памяти: итог под-агента {}[/]".format(message.model),
+                title_align="left",
+                border_style="green",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
         return Panel(
             Text(message.content),
             title="[bold {}]🧑 Вы[/]".format(USER_ACCENT),
@@ -624,6 +635,7 @@ COMMANDS: List[tuple] = [
     ("/history", "показать всю переписку целиком"),
     ("/stats", "подробная статистика по токенам"),
     ("/config", "конфиг агента целиком — его можно сохранить и запустить с --config"),
+    ("/agent", "вызвать под-агента с нужным конфигом; без аргументов — список конфигов"),
     ("/change_llm_params", "изменить параметры генерации; без аргументов — "
                            "таблица с текущими значениями"),
     ("/reset_llm_params", "вернуть параметры к значениям по умолчанию"),
