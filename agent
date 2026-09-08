@@ -7,7 +7,18 @@
 # Каждый запуск — своя сессия со своей памятью. Окружение готовится один раз.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Скрипт задуман для запуска через симлинк из PATH, поэтому свой каталог он
+# должен искать по настоящему файлу, а не по ссылке: иначе окружение создаётся
+# рядом с симлинком, а зависимости ищутся в ~/.local/bin.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *)  SOURCE="$(cd -P "$(dirname "$SOURCE")" && pwd)/$TARGET" ;;
+  esac
+done
+HERE="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 VENV="$HERE/.venv"
 PYTHON="${PYTHON:-python3}"
 

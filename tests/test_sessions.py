@@ -577,3 +577,29 @@ def test_good_form_gets_no_caveat():
     from llmchat.subagent import Delegation
 
     assert delegation_caveat(Delegation("x", "q", valid=True)) == ""
+
+
+def test_launcher_works_through_a_symlink(tmp_path):
+    """Скрипт запуска задуман для PATH, значит обязан работать через ссылку.
+
+    Пока он искал свой каталог по ссылке, а не по настоящему файлу, запуск
+    через симlink создавал окружение рядом с симлинком и падал на поиске
+    requirements.txt в ~/.local/bin.
+    """
+    # Каталог ссылки и домашний каталог — разные: в домашний система кладёт
+    # своё, и по нему нельзя судить, намусорил ли скрипт рядом с ссылкой.
+    bin_dir = tmp_path / "bin"
+    home = tmp_path / "home"
+    bin_dir.mkdir()
+    home.mkdir()
+    link = bin_dir / "agent"
+    link.symlink_to(ROOT / "agent")
+
+    finished = subprocess.run([str(link), "--config", "demo", "--set",
+                               "transport.demo_delay=0", "--ask", "Привет"],
+                              cwd=str(home), capture_output=True, text=True,
+                              env=child_env(home), timeout=120)
+    assert finished.returncode == 0, finished.stderr[-800:]
+    assert "Вы спросили" in finished.stdout
+    # Окружение должно подняться в репозитории, а не рядом с ссылкой.
+    assert [item.name for item in bin_dir.iterdir()] == ["agent"]
