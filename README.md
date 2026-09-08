@@ -759,7 +759,7 @@ agent --config frugal --temperature 0.2 --show-config
 agent --config '{"model": "gpt-5.4-nano", "budget": {"max_cost": 0.01}}' --ask "..."
 ```
 
-Полный перечень всех 33 полей с объяснением каждого — в
+Полный перечень полей с объяснением каждого — в
 [docs/plan-config-overrides.md](docs/plan-config-overrides.md).
 
 ### Сессии

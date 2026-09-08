@@ -128,7 +128,7 @@ $ ./spawn.sh --agents 100
 
 | Что добавилось | Как выглядит |
 |---|---|
-| правка любого из 33 полей при запуске | `--set output.require_valid=true` |
+| правка любого поля конфига при запуске | `--set output.require_valid=true` |
 | короткие имена частых полей | `--set temperature=0.2` вместо полного пути |
 | именованные флаги на частое | `--model`, `--temperature`, `--format`, `--max-cost`, `--no-history`, `--name` |
 | дописка к системному промпту | `--append-system-prompt` |
