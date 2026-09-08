@@ -71,6 +71,9 @@ class Agent:
         """
         updated = self._config.with_changes(**changes)
         updated.resolve()
+        # Инструменты проверяем до того, как конфиг применён: иначе неверное
+        # имя оставляло бы агента с новым конфигом и прежним набором.
+        tools = self._all_tools.only(updated.tools.enabled) if "tools" in changes else None
 
         provider_changed = (updated.provider, updated.model) != (
             self._config.provider, self._config.model)
@@ -88,8 +91,8 @@ class Agent:
             self._credentials = None
         if "judge" in changes:
             self._judge_agent = None
-        if "tools" in changes:
-            self._toolbox = self._all_tools.only(updated.tools.enabled)
+        if tools is not None:
+            self._toolbox = tools
         return updated
 
     # --- транспорт ------------------------------------------------------
@@ -297,7 +300,8 @@ class Agent:
         return completion
 
     def _use_tools(self, transcript: List[Dict[str, object]],
-                   invocations: List[Dict[str, object]]) -> Completion:
+                   invocations: List[Dict[str, object]],
+                   spent: Dict[str, float]) -> Completion:
         """Спрашивать модель, пока она просит вызвать инструменты.
 
         Один круг — модель просит вызов, мы выполняем и возвращаем результат.
@@ -320,6 +324,10 @@ class Agent:
                                     tools=None if last else definitions)
             if last or not completion.tool_calls:
                 return completion
+            # Круг, на котором модель просила вызов, тоже стоил токенов и денег.
+            # Без этого сложения итог показывал вдвое меньше потраченного, а
+            # под-агент недоговаривал вызвавшему, во что обошёлся.
+            _pile_up(spent, completion)
 
             transcript.append(_assistant_asking(completion))
             for call in completion.tool_calls:
@@ -369,10 +377,13 @@ class Agent:
         cost: Optional[float] = None
 
         invocations: List[Dict[str, object]] = []
+        # Расход кругов инструментов складывается сюда: сама модель отдаёт
+        # только последний ответ, а платили мы за каждый.
+        tool_spent: Dict[str, float] = {}
         while attempt < policy.max_attempts:
             attempt += 1
             if self._toolbox and attempt == 1:
-                completion = self._use_tools(transcript, invocations)
+                completion = self._use_tools(transcript, invocations, tool_spent)
             else:
                 completion = self._call(transcript,
                                         kind=MAIN if attempt == 1 else REPAIR)
@@ -398,6 +409,12 @@ class Agent:
                 {"role": "assistant", "content": completion.text},
                 {"role": "user", "content": policies.repair_request(validation)},
             ]
+
+        prompt_tokens += int(tool_spent.get("prompt_tokens", 0))
+        completion_tokens += int(tool_spent.get("completion_tokens", 0))
+        reasoning_tokens += int(tool_spent.get("reasoning_tokens", 0))
+        spent_seconds += tool_spent.get("seconds", 0.0)
+        cost = _add(cost, tool_spent.get("cost"))
 
         text = policies.clean_output(policy, completion.text)
         if not text:
@@ -430,8 +447,15 @@ class Agent:
             message.reasoning_tokens = reasoning_tokens
             message.cost = cost
             message.cost_currency = model.currency
-            self.conversation.note_exchange(completion.prompt_tokens,
-                                            completion.completion_tokens)
+            if invocations:
+                # Последний запрос нёс всю служебную переписку с инструментом,
+                # и его размер к сохранённой истории отношения не имеет. Взять
+                # его за размер контекста значило бы объявить окно полным на
+                # втором вопросе и выбросить его.
+                self.conversation.forget_exact()
+            else:
+                self.conversation.note_exchange(completion.prompt_tokens,
+                                                completion.completion_tokens)
 
         if self._config.judge is not None:
             self._apply_judge(result, question)
@@ -527,6 +551,18 @@ def _assistant_asking(completion: Completion) -> Dict[str, object]:
             for call in completion.tool_calls
         ],
     }
+
+
+def _pile_up(spent: Dict[str, float], completion: Completion) -> None:
+    """Сложить расход одного обращения в общую копилку."""
+    spent["prompt_tokens"] = spent.get("prompt_tokens", 0) + completion.prompt_tokens
+    spent["completion_tokens"] = (spent.get("completion_tokens", 0)
+                                  + completion.completion_tokens)
+    spent["reasoning_tokens"] = (spent.get("reasoning_tokens", 0)
+                                 + completion.reasoning_tokens)
+    spent["seconds"] = spent.get("seconds", 0.0) + completion.elapsed
+    if completion.cost is not None:
+        spent["cost"] = spent.get("cost", 0.0) + completion.cost
 
 
 def _add(current: Optional[float], addition: Optional[float]) -> Optional[float]:

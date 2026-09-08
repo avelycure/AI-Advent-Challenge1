@@ -351,6 +351,25 @@ _TUPLE_FIELDS = {
 }
 
 
+def is_tuple_field(path: str) -> bool:
+    """Ждёт ли поле по этому пути набор значений, а не одно.
+
+    Владелец определяется по пути, а не угадывается по имени поля. Угадывание
+    уже подводило: ``enabled`` у истории — признак, а у инструментов — перечень
+    имён, и по одному имени они превращались друг в друга.
+    """
+    segments = [part for part in path.split(".") if part]
+    if not segments:
+        return False
+    owner: Any = AgentConfig
+    if len(segments) > 1:
+        holder = _NESTED.get(segments[-2])
+        if holder is None:
+            return False
+        owner = AgentConfig if holder == "AgentConfig" else holder
+    return (owner, segments[-1]) in _TUPLE_FIELDS
+
+
 def field_type(path: str) -> Optional[type]:
     """Объявленный тип поля по пути внутрь конфига. None — путь неизвестен.
 
@@ -412,6 +431,11 @@ def _restore(owner: type, name: str, value: Any) -> Any:
     и разбор по имени превращал один в другой.
     """
     if (owner, name) in _TUPLE_FIELDS:
+        if isinstance(value, str):
+            # Одно значение строкой — обычная запись: «--set forbidden=пароль».
+            # Без этой ветки строка разбиралась на буквы, и запрещённым
+            # оказывался каждый знак по отдельности.
+            return (value,) if value else ()
         return tuple(value or ())
     if (owner, name) == (JudgeConfig, "criteria"):
         return tuple(tuple(item) for item in value or ())

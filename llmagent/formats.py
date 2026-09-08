@@ -34,9 +34,15 @@ class Field:
     minimum: Optional[float] = None
     maximum: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        if self.kind not in KINDS:
+            raise ValueError(
+                "поле {}: неизвестный тип «{}»; доступны: {}".format(
+                    self.name, self.kind, ", ".join(KINDS)))
+
     @property
     def python_type(self) -> type:
-        return KINDS.get(self.kind, str)
+        return KINDS[self.kind]
 
 
 @dataclass(frozen=True)
@@ -166,8 +172,16 @@ def markdown_parser(schema: Schema) -> Callable[[str], Any]:
             record: Dict[str, Any] = dict(zip(header, cells))
             # В таблице всё приходит текстом — приводим числовые поля к числам.
             for spec in schema.fields:
-                if spec.python_type in (int, float) and spec.name in record:
-                    record[spec.name] = spec.python_type(str(record[spec.name]).strip())
+                if spec.name not in record:
+                    continue
+                raw = str(record[spec.name]).strip()
+                if spec.python_type is bool:
+                    # В таблице всё приходит текстом, и «true» без приведения
+                    # никогда не сходилось со схемой: ответ уходил в переспрос
+                    # за настоящие деньги, хотя был верным.
+                    record[spec.name] = raw.lower() in ("true", "да", "1", "yes")
+                elif spec.python_type in (int, float):
+                    record[spec.name] = spec.python_type(raw)
             items.append(record)
         return {schema.key: items}
 

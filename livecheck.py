@@ -526,7 +526,7 @@ def bad_values(harness: Harness) -> Outcome:
 def every_flag(harness: Harness) -> Outcome:
     other = harness.other_model()
     payload = harness.ask_json("Привет", "--model", other, "--max-tokens", "64",
-                               "--name", "черновик", "--temperature", "0.1",
+                               "--agent-name", "черновик", "--temperature", "0.1",
                                "--no-history", "--set", "attempts=2")
     marks = [payload["model"] == other, payload["agent"] == "черновик",
              payload["ok"], payload["usage"]["requests"] == 1]

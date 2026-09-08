@@ -80,7 +80,7 @@ def test_record_carries_what_the_list_shows(store):
     store.save(agent, topic="Знакомство")
     record = store.load(agent.session_id)
     assert record.topic == "Знакомство"
-    assert record.name == "проба"
+    assert record.agent == "проба"
     assert record.model == "gpt-5.4-mini"
     assert record.exchanges == 1
     assert record.total_tokens == agent.usage.total_tokens
@@ -111,8 +111,7 @@ def test_empty_session_is_not_saved(store):
 def test_the_key_never_reaches_the_disk(store):
     agent = talked(AgentConfig(name="проба", api_key="sk-очень-секретный",
                                transport=FAST_DEMO))
-    path = store.save(agent)
-    raw = pathlib.Path(path).read_text(encoding="utf-8")
+    raw = store.save(agent).path.read_text(encoding="utf-8")
     assert "очень-секретный" not in raw
     # Именно null, а не звёздочки: строка «***» при возврате ушла бы
     # провайдеру как настоящий ключ.
@@ -128,12 +127,12 @@ def test_judge_key_never_reaches_the_disk(store):
     config = config.with_changes(judge=replace(
         config.judge, agent=config.judge.agent.with_changes(api_key="sk-судейский")))
     agent = talked(config, replies=("ответ", "полнота: 5\nясность: 5\nобоснованность: 5"))
-    raw = pathlib.Path(store.save(agent)).read_text(encoding="utf-8")
+    raw = store.save(agent).path.read_text(encoding="utf-8")
     assert "судейский" not in raw
 
 
 def test_files_are_readable_only_by_their_owner(store):
-    path = pathlib.Path(store.save(talked()))
+    path = store.save(talked()).path
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600, oct(mode)
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700

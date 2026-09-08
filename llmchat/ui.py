@@ -69,10 +69,11 @@ PASTE_OPEN = re.compile(r"^(?:\x1b\[200~|200~|00~)")
 PASTE_CLOSE = re.compile(r"\x1b\[201~|201~|01~")
 # Полное обрамление срезаем всегда: в осмысленном тексте оно не встречается.
 FULL_MARKERS = re.compile(r"\x1b\[20[01]~")
-# Обкусанное — только внутри вставки, о начале которой уже известно: «01~»
-# может оказаться и частью настоящего текста, и портить его нельзя.
-# Длинный вид идёт первым, иначе короткий отгрыз бы у него хвост.
-SHORT_MARKERS = re.compile(r"20[01]~|0[01]~")
+# Обкусанное срезается только по краям вставки. Всюду срезать нельзя: строка
+# вроде «curl "http://x/?v=201~2"» теряла хвост, то есть текст человека молча
+# портился по дороге к модели.
+SHORT_OPEN = re.compile(r"^(?:200~|00~)")
+SHORT_CLOSE = re.compile(r"(?:201~|01~)\s*$")
 
 # Сколько десятых долей секунды ждать продолжения вставки. Ожидание нужно:
 # входной буфер терминала меньше длинной вставки, и её хвост дописывается
@@ -117,7 +118,9 @@ def _paste_ended(text: str) -> bool:
 
 def _without_markers(text: str, pasting: bool) -> str:
     cleaned = FULL_MARKERS.sub("", text)
-    return SHORT_MARKERS.sub("", cleaned) if pasting else cleaned
+    if not pasting:
+        return cleaned
+    return SHORT_CLOSE.sub("", SHORT_OPEN.sub("", cleaned))
 
 
 def _paste_tail() -> str:
@@ -411,6 +414,11 @@ def ask_token(console: Console, provider: ProviderInfo, step: int = 2,
 # Основной кадр диалога
 # --------------------------------------------------------------------------
 
+def shorten_title(text: str, limit: int = 34) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def build_header(session: Session) -> RenderableType:
     grid = Table.grid(expand=True)
     grid.add_column(justify="left", ratio=1)
@@ -424,7 +432,8 @@ def build_header(session: Session) -> RenderableType:
     )
     return Panel(
         grid,
-        title="💬 Сессия {}".format(session.agent.session_id),
+        title="💬 {} · {}".format(shorten_title(session.label),
+                                   session.agent.session_id),
         title_align="left",
         border_style=session.provider.accent,
         box=box.ROUNDED,
@@ -681,6 +690,7 @@ COMMANDS: List[tuple] = [
     ("/help", "эта справка"),
     ("/history", "показать всю переписку целиком"),
     ("/stats", "подробная статистика по токенам"),
+    ("/rename", "переименовать сессию — по имени её потом видно в --sessions"),
     ("/config", "конфиг агента целиком — его можно сохранить и запустить с --config"),
     ("/agent", "вызвать под-агента с нужным конфигом; без аргументов — список конфигов"),
     ("/change_llm_params", "изменить параметры генерации; без аргументов — "

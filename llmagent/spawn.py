@@ -86,6 +86,16 @@ def ask_safely(config: AgentConfig, question: str,
 def summarize(results: Sequence[AgentResult]) -> Dict[str, Any]:
     """Сводка по пачке: сколько ответило, во что обошлось, что сломалось."""
     done = [r for r in results if r.error is None]
+    # Цены складываются по валютам: рубли с долларами в одну сумму не идут.
+    # Неизвестная цена считается отдельно, а не нулём: ноль выглядел бы как
+    # «бесплатно», хотя на самом деле «неизвестно».
+    costs: Dict[str, float] = {}
+    unpriced = 0
+    for item in done:
+        if item.cost is None:
+            unpriced += 1
+        else:
+            costs[item.currency] = costs.get(item.currency, 0.0) + item.cost
     return {
         "agents": len(results),
         "answered": len(done),
@@ -93,6 +103,8 @@ def summarize(results: Sequence[AgentResult]) -> Dict[str, Any]:
         "valid": sum(1 for r in done if r.ok),
         "total_tokens": sum(r.total_tokens for r in done),
         "seconds": round(sum(r.seconds for r in done), 3),
-        "cost": round(sum(r.cost or 0.0 for r in done), 6),
+        "costs": {name: round(value, 6) for name, value in costs.items()},
+        "cost": round(costs.get("USD", 0.0), 6),
+        "unpriced": unpriced,
         "errors": sorted({r.error for r in results if r.error}),
     }

@@ -118,20 +118,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                       help="потолок трат за сессию")
     tune.add_argument("--no-history", action="store_true",
                       help="отвечать без памяти: каждый вопрос сам по себе")
-    tune.add_argument("--name", metavar="ИМЯ", help="подпись агента")
+    tune.add_argument("--agent-name", metavar="ИМЯ",
+                      help="подпись агента (видна в панелях под-агентов)")
     tune.add_argument("--set", action="append", default=[], metavar="ПОЛЕ=ЗНАЧЕНИЕ",
                       help="любое поле конфига по полному пути; можно повторять")
     tune.add_argument("--show-config", action="store_true",
                       help="напечатать собранный конфиг и выйти")
 
     live = parser.add_argument_group("сессии")
+    live.add_argument("--name", metavar="ИМЯ",
+                      help="имя сессии: по нему её видно в списке и можно вернуться")
     live.add_argument("--session-id", metavar="ID", help="свой идентификатор сессии")
     live.add_argument("-c", "--continue", dest="continue_session", action="store_true",
                       help="продолжить самую свежую сохранённую сессию")
-    live.add_argument("-r", "--resume", metavar="ID", help="вернуться в названную сессию")
-    live.add_argument("--sessions", action="store_true",
-                      help="показать сохранённые сессии и выйти")
-    live.add_argument("--rm-session", metavar="ID",
+    live.add_argument("-r", "--resume", nargs="?", const="", metavar="НОМЕР|ИМЯ|ID",
+                      help="вернуться в сессию; без значения предложит выбрать")
+    live.add_argument("--sessions", nargs="?", const="", metavar="СЛОВО",
+                      help="показать сохранённые сессии; со словом — только те, "
+                           "где оно встречается")
+    live.add_argument("--rm-session", metavar="НОМЕР|ИМЯ|ID",
                       help="удалить сессию; all — удалить все")
     live.add_argument("--no-save", action="store_true",
                       help="не сохранять эту сессию на диск")
@@ -413,7 +418,20 @@ def chat_loop(console: Console, keys, session: Session,
         if sessions is None:
             return
         try:
-            sessions.save(session.agent, topic=session.topic)
+            # Имя придумывается само, если человек его не задал: пустая
+            # подпись в списке бесполезна, а тему модель уже сочинила.
+            if not session.title:
+                session.title = session.suggest_title()
+            saved = sessions.save(session.agent, topic=session.topic,
+                                  title=session.title, seen_at=session.seen_at)
+            session.seen_at = saved.updated_at
+            if saved.forked_from:
+                console.print(warning_panel(
+                    "Эту сессию успел изменить кто-то ещё — похоже, она открыта "
+                    "во втором окне.\nЧтобы ничего не потерялось, разговор "
+                    "продолжается отдельной сессией [bold]{}[/].\n"
+                    "[dim]Прежняя ({}) осталась целой.[/]".format(
+                        saved.session_id, saved.forked_from)))
         except (OSError, AgentError) as exc:
             # Сессия — удобство, а не суть: не записалась, так не записалась,
             # но терять из-за этого уже полученный ответ недопустимо.
@@ -446,6 +464,10 @@ def chat_loop(console: Console, keys, session: Session,
             if command == "/config":
                 notice = config_panel(session)
                 continue
+            if command in ("/rename", "/name"):
+                notice = rename_session(session, argument)
+                remember()
+                continue
             if command == "/history":
                 render_history(console, session)
                 continue
@@ -468,6 +490,7 @@ def chat_loop(console: Console, keys, session: Session,
                 continue
             if command == "/retry":
                 notice = retry_last(console, session)
+                remember()
                 continue
             if command in ("/agent", "/agents", "/sub"):
                 notice = delegate(console, session, argument)
@@ -478,6 +501,10 @@ def chat_loop(console: Console, keys, session: Session,
                 # остаётся на диске, и его не затирает первый же новый ответ.
                 session.agent.new_session()
                 session.reset()
+                # Имя тоже забываем: иначе новый разговор сохранился бы под
+                # именем прежнего, и оба стали бы неотличимы в списке.
+                session.title = ""
+                session.seen_at = time.time()
                 notice = info_panel(
                     "История очищена, контекст свободен.\n"
                     "[dim]Это новая сессия {}; прежняя осталась в списке "
@@ -527,6 +554,23 @@ def chat_loop(console: Console, keys, session: Session,
             )
 
     farewell(console, session)
+
+
+def rename_session(session: Session, argument: str) -> RenderableType:
+    """Переименовать сессию. Имя — то, по чему её потом узнают в списке."""
+    wanted = " ".join(argument.split())
+    if not wanted:
+        return info_panel(
+            "Сейчас сессия зовётся «[bold]{}[/]».\n"
+            "[dim]Переименовать:[/] [cyan]/rename Разбор алгоритмов[/]".format(
+                session.label), title="Имя сессии", style="cyan")
+    if len(wanted) > 60:
+        return error_panel("Имя длиннее 60 знаков — в списке оно не поместится.")
+    session.title = wanted
+    return info_panel(
+        "Сессия теперь зовётся «[bold]{}[/]».\n"
+        "[dim]Вернуться в неё:[/] [cyan]--resume \"{}\"[/]".format(wanted, wanted),
+        title="Переименовано", style="green")
 
 
 def delegate(console: Console, session: Session, argument: str) -> RenderableType:
@@ -640,7 +684,7 @@ FLAG_FIELDS = (
     ("system_prompt", "system_prompt"),
     ("format", "output.format"),
     ("max_cost", "budget.max_cost"),
-    ("name", "name"),
+    ("agent_name", "name"),
 )
 
 
@@ -746,34 +790,67 @@ def resolved_config_panel(config: AgentConfig, width: int = 100) -> RenderableTy
                  border_style="green", box=box.ROUNDED, padding=(0, 1))
 
 
-def sessions_panel(records: List[SessionRecord], root: str) -> RenderableType:
+def sessions_panel(records: List[SessionRecord], root: str,
+                   needle: str = "") -> RenderableType:
     if not records:
+        if needle:
+            return info_panel(
+                "По слову «{}» ничего не нашлось. Показать все — --sessions "
+                "без слова.".format(needle), title="Сессии", style="yellow")
         return info_panel(
             "Сохранённых сессий нет. Они появляются после первого ответа "
             "в диалоге; одиночные запросы через --ask не сохраняются.",
             title="Сессии", style="yellow")
 
     table = Table(box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False, expand=True)
-    table.add_column("Идентификатор", style="bold", no_wrap=True)
-    table.add_column("Когда", no_wrap=True)
-    table.add_column("Модель", no_wrap=True)
-    table.add_column("Обменов", justify="right")
-    table.add_column("Токенов", justify="right", style="dim")
-    table.add_column("Тема")
+    table.add_column("№", justify="right", style="dim", no_wrap=True)
+    table.add_column("Имя", style="bold", no_wrap=True)
+    table.add_column("Когда", no_wrap=True, style="dim")
+    table.add_column("Обменов", justify="right", style="dim")
+    table.add_column("О чём говорили")
 
     for record in records:
-        table.add_row(record.session_id, when(record.updated_at), record.model,
-                      str(record.exchanges), fmt(record.total_tokens),
-                      record.topic or record.name or "—")
+        name = shorten_to(record.label, 28)
+        about = shorten_to(record.first_question, 52)
+        # Имя, придуманное из первого вопроса, повторяло бы его в соседней
+        # колонке. Повтор занимает самое широкое место в списке и ничего
+        # не добавляет, поэтому второй раз показываем прочерк.
+        if _same_start(name, about):
+            about = "—"
+        table.add_row(str(record.number), name, when(record.updated_at),
+                      str(record.exchanges), about)
 
     hint = Text.from_markup(
-        "\n[cyan]--continue[/][dim] — вернуться в самую свежую · [/]"
-        "[cyan]--resume {}[/][dim] — в названную · [/]"
-        "[cyan]--rm-session {}[/][dim] или [/][cyan]--rm-session all[/][dim] — удалить[/]\n"
+        "\n[cyan]--resume {}[/][dim] — по номеру · [/][cyan]--resume {}[/]"
+        "[dim] — по имени · [/][cyan]--continue[/][dim] — в самую свежую[/]\n"
+        "[cyan]--resume[/][dim] без имени — предложит выбрать · [/]"
+        "[cyan]--sessions слово[/][dim] — поиск по переписке · [/]"
+        "[cyan]--rm-session {}[/][dim] — удалить[/]\n"
         "[dim]Переписка лежит файлами в {} и читается только вами.[/]".format(
-            records[0].session_id, records[0].session_id, root))
-    return Panel(Group(table, hint), title="🗂 Сохранённые сессии", title_align="left",
+            1, quoted(records[0].label), 1, root))
+    title = "🗂 Сохранённые сессии" if not needle else \
+        "🗂 Сессии по слову «{}»".format(needle)
+    return Panel(Group(table, hint), title=title, title_align="left",
                  border_style="cyan", box=box.ROUNDED, padding=(0, 1))
+
+
+def _same_start(left: str, right: str) -> bool:
+    """Одно ли и то же говорят две подписи, с точностью до обрезки."""
+    shorter, longer = sorted((left.rstrip("…"), right.rstrip("…")), key=len)
+    return bool(shorter) and longer.startswith(shorter)
+
+
+def shorten_to(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    if not text:
+        return "—"
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def quoted(name: str) -> str:
+    """Имя для примера в подсказке: с пробелами — в кавычках."""
+    short = shorten_to(name, 20)
+    return '"{}"'.format(short) if " " in short else short
 
 
 def when(moment: float) -> str:
@@ -817,8 +894,7 @@ def agent_from_config(console: Console, config: AgentConfig, store,
     return Agent(ready, session_id=session_id, toolbox=subagent.toolbox_for(ready))
 
 
-def one_shot(args: argparse.Namespace, record: Optional[SessionRecord],
-             config: AgentConfig) -> int:
+def one_shot(args: argparse.Namespace, sessions: SessionStore) -> int:
     """Один вопрос без диалога: этим режимом родитель вызывает под-агента.
 
     Ни одного вопроса в консоль здесь не задаётся — процесс может быть
@@ -840,7 +916,14 @@ def one_shot(args: argparse.Namespace, record: Optional[SessionRecord],
             print(message, file=sys.stderr)
         return code
 
+    if args.resume == "":
+        # Выбирать не у кого: этот режим бывает дочерним процессом, и вопрос
+        # в stdout сломал бы разбор ответа у вызывающего.
+        return fail("с --ask сессию надо назвать: --resume <номер|имя|id>", 2)
+
     try:
+        record, base = choose_base(args, sessions)
+        config = build_config(args, base)
         toolbox = subagent.toolbox_for(config)
         if record is not None:
             agent = restore_agent(record, config, toolbox=toolbox)
@@ -850,10 +933,14 @@ def one_shot(args: argparse.Namespace, record: Optional[SessionRecord],
         # должен быть свой код возврата, иначе вызывающий не отличит его от
         # отказа провайдера и станет повторять безнадёжный вызов.
         agent.credentials
-    except ConfigError as exc:
-        return fail("конфиг не принят: {}".format(exc), 2)
     except MissingCredentials as exc:
         return fail(str(exc), 3)
+    except ConfigError as exc:
+        return fail("конфиг не принят: {}".format(exc), 2)
+    except AgentError as exc:
+        # Любая другая беда агента — тоже ответ, а не трассировка в stdout:
+        # её читает вызывающий, и он ждёт объект JSON.
+        return fail(str(exc), 2)
 
     try:
         result = agent.ask(args.ask)
@@ -871,8 +958,9 @@ def one_shot(args: argparse.Namespace, record: Optional[SessionRecord],
     return 0
 
 
-def list_sessions(console: Console, sessions: SessionStore) -> int:
-    console.print(sessions_panel(sessions.recent(), str(sessions.root)))
+def list_sessions(console: Console, sessions: SessionStore, needle: str = "") -> int:
+    records = sessions.matching(needle) if needle else sessions.recent()
+    console.print(sessions_panel(records, str(sessions.root), needle))
     return 0
 
 
@@ -887,6 +975,8 @@ def remove_sessions(console: Console, sessions: SessionStore, target: str) -> in
     try:
         found = sessions.remove(target)
     except AgentError as exc:
+        # Неоднозначное имя: сказать «нет такой» было бы неправдой, а удалить
+        # наугад — потерей чужого разговора.
         console.print(error_panel(str(exc)))
         return 1
     if found:
@@ -901,13 +991,35 @@ def pick_record(args: argparse.Namespace,
                 sessions: SessionStore) -> Optional[SessionRecord]:
     """Найти сессию, в которую велено вернуться."""
     if args.resume:
-        return sessions.load(args.resume)
+        return sessions.find(args.resume)
+    if args.resume == "":
+        # «--resume» без значения: человек хочет вернуться, но не помнит куда.
+        return choose_record(sessions)
     if args.continue_session:
         record = sessions.latest()
         if record is None:
             raise ConfigError("возвращаться некуда: сохранённых сессий нет")
         return record
     return None
+
+
+def choose_record(sessions: SessionStore) -> SessionRecord:
+    """Показать список и спросить, какую сессию продолжить."""
+    records = sessions.recent(limit=20)
+    if not records:
+        raise ConfigError("возвращаться некуда: сохранённых сессий нет")
+    if len(records) == 1:
+        return records[0]
+
+    console = make_console()
+    console.print(sessions_panel(records, str(sessions.root)))
+    try:
+        answer = read_user_line(console, "[bold cyan]Какую продолжить? ›[/] ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raise ConfigError("выбор прерван")
+    if not answer:
+        raise ConfigError("сессия не выбрана")
+    return sessions.find(answer)
 
 
 def choose_base(args: argparse.Namespace, sessions: SessionStore):
@@ -951,7 +1063,10 @@ def build_agent(console: Console, args: argparse.Namespace, sessions: SessionSto
         return agent
 
     session_id = check_session_id(args.session_id, sessions)
-    if args.config:
+    if args.config or args.provider or args.model:
+        # Провайдер или модель, названные флагом, — это уже сделанный выбор.
+        # Расспрос поверх него не только лишний: он ещё и затирал названное
+        # своими ответами, и документированная команда работала не так.
         show_banner(console)
         return agent_from_config(console, config, keys, session_id)
     chosen = setup(console, args.demo, ask_keys=args.ask_keys, store=keys, base=config)
@@ -985,8 +1100,10 @@ def returned_panel(record: SessionRecord, agent: Agent) -> RenderableType:
     table = Table.grid(padding=(0, 2))
     table.add_column(style="dim")
     table.add_column(style="bold")
-    table.add_row("Сессия", record.session_id)
+    table.add_row("Сессия", "{} · {}".format(record.label, record.session_id))
     table.add_row("Последний раз", when(record.updated_at))
+    if record.first_question:
+        table.add_row("Начиналась с", shorten_to(record.first_question, 64))
     table.add_row("Переписка", "{} {} · {} {}".format(
         len(record.messages), plural(len(record.messages),
                                      ("сообщение", "сообщения", "сообщений")),
@@ -1005,14 +1122,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     sessions = SessionStore()
     console = make_console()
 
-    if args.sessions:
-        return list_sessions(console, sessions)
+    if args.sessions is not None:
+        return list_sessions(console, sessions, args.sessions)
     if args.rm_session:
         return remove_sessions(console, sessions, args.rm_session)
 
-    # Конфиг разбираем один раз на все дальнейшие пути. Раньше каждый путь
-    # собирал его сам, и они разошлись: одиночный запрос терял --resume,
-    # а хранилище ключей не знало о демонстрационном режиме сессии.
+    # Одиночный запрос разбирает конфиг сам и сам отвечает на беды: до этой
+    # ветки нельзя напечатать ни панели, ни вопроса, иначе вызывающий получит
+    # рамки вместо JSON.
+    if args.ask is not None:
+        return one_shot(args, sessions)
+
     try:
         record, base = choose_base(args, sessions)
         config = build_config(args, base)
@@ -1023,8 +1143,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.show_config:
         console.print(resolved_config_panel(config, console.width))
         return 0
-    if args.ask is not None:
-        return one_shot(args, record, config)
 
     enable_line_editing()
     keys = switching.CredentialStore(demo=config.transport.demo, ask_keys=args.ask_keys)
@@ -1038,6 +1156,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 130
 
     topic = record.topic if record is not None and record.topic else DEFAULT_TOPIC
-    chat_loop(console, keys, Session(agent, topic=topic),
-              sessions=None if args.no_save else sessions)
+    title = args.name or (record.title if record is not None else "")
+    live = Session(agent, topic=topic, title=title)
+    # Время прочитанной записи запоминаем: по нему потом видно, не изменил ли
+    # эту сессию кто-то ещё, пока мы разговаривали.
+    live.seen_at = record.updated_at if record is not None else time.time()
+    chat_loop(console, keys, live, sessions=None if args.no_save else sessions)
     return 0

@@ -281,3 +281,41 @@ def test_quotes_around_the_config_name_are_ignored():
 
     assert resolve_config('"frugal"').stem == "frugal"
     assert split_request('"frugal" Что такое код') == ("frugal", [], "Что такое код")
+
+
+def test_tool_rounds_are_counted_in_the_result_not_only_in_the_meter():
+    """Иначе под-агент недоговаривал вызвавшему, во что обошёлся.
+
+    Итог уходит родителю через --json, и его бюджет считался по половине
+    настоящего расхода.
+    """
+    client = ToolCallingClient("spawn_agent", ARGUMENTS, "готово", rounds=1)
+    agent = agent_with(client)
+    result = agent.ask("вопрос")
+    # В счётчике только свои обращения — расхода инструмента тут нет.
+    assert result.total_tokens == agent.usage.total_tokens
+    assert result.total_tokens > 0
+    assert agent.usage.by_kind[TOOL].requests == 1
+
+
+def test_the_context_is_not_declared_full_after_a_tool_round():
+    """Последний запрос нёс служебную переписку, и его размер к истории не про.
+
+    Прежде он записывался как размер контекста, окно объявлялось полным, и
+    следующий вопрос выбрасывался с «Контекст заполнен».
+    """
+    agent = agent_with(ToolCallingClient("spawn_agent", ARGUMENTS, "готово", rounds=1))
+    agent.ask("первый вопрос")
+    assert not agent.is_full()
+    assert agent.context_used() < 1000
+    second = agent.ask("второй вопрос")
+    assert second.ok and len(agent.conversation) == 4
+
+
+def test_a_wrong_tool_name_in_reconfigure_leaves_the_agent_whole():
+    """Конфиг применяется только после проверки, иначе агент остался бы битым."""
+    agent = agent_with(ScriptedClient("ответ"))
+    with pytest.raises(AgentError):
+        agent.reconfigure(tools=ToolPolicy(enabled=("нетакого",)))
+    assert agent.config.tools.enabled == ("spawn_agent",)
+    assert agent.toolbox.names == ["spawn_agent"]

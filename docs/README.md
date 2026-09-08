@@ -17,6 +17,7 @@
 | [feature-reasoning.md](feature-reasoning.md) | четыре способа поставить одну задачу; там же — переснятое задание 2 про пять рычагов |
 | [feature-groq.md](feature-groq.md) | Groq — восьмой провайдер, ещё один источник без оплаты |
 | [feature-model-switch.md](feature-model-switch.md) | смена модели и провайдера во время диалога, повтор вопроса |
+| [feature-context-persistence.md](feature-context-persistence.md) | сохранение контекста: имена сессий, поиск по переписке, возврат в разговор |
 | [feature-agent.md](feature-agent.md) | агент как отдельная сущность: конфиг, политики, судья, учёт токенов, спавн сотни агентов |
 
 Все эти работы собраны в одной ветке `feature/llm-params`: сначала они велись

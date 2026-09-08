@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .config import AgentConfig, default_section, field_type
+from .config import AgentConfig, default_section, field_type, is_tuple_field
 from .errors import ConfigError
 
 
@@ -61,6 +61,21 @@ def coerce(path: str, current: Any, raw: Any) -> Any:
     ``--max-cost 0.0000001`` роняло агента при проверке бюджета, потому что
     YAML не считает числом запись ``1e-07`` — в YAML 1.1 нужна точка.
     """
+    if is_tuple_field(path):
+        # Поле ждёт набор. Запись «[а, б]» разбирается как список, а одно
+        # значение остаётся одним значением, а не рассыпается на буквы.
+        if isinstance(raw, (list, tuple)):
+            return tuple(raw)
+        text = str(raw).strip()
+        if text.startswith("["):
+            import yaml
+
+            try:
+                return tuple(yaml.safe_load(text) or ())
+            except Exception:  # noqa: BLE001
+                raise ConfigError("{}: перечень не разобран: {}".format(path, raw))
+        return (text,) if text else ()
+
     declared = field_type(path)
     if declared is str or (declared is None and isinstance(current, str)):
         return raw if isinstance(raw, str) else str(raw)

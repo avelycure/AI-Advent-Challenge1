@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import select
+import signal
 import time
 
 import pytest
@@ -30,8 +31,15 @@ class Terminal:
                        "HOME": str(home), "COLUMNS": "100", "TERM": "xterm-256color"}
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.chdir(str(ROOT))
-            os.execve(PYTHON, [PYTHON, "chat.py", *arguments], environment)
+            # Ветка дочернего процесса. Выйти из неё обязательно самому: если
+            # execve сорвётся, ребёнок продолжит выполнять набор тестов вторым
+            # процессом, и падать начнёт где угодно, кроме места ошибки.
+            try:
+                os.chdir(str(ROOT))
+                os.execve(PYTHON, [PYTHON, "chat.py", *arguments], environment)
+            except BaseException:
+                os._exit(127)
+            os._exit(127)
         self.seen: list = []
 
     def wait(self, seconds: float) -> None:
@@ -53,9 +61,22 @@ class Terminal:
         time.sleep(0.2)
 
     def close(self) -> None:
+        """Закрыть терминал и непременно похоронить ребёнка.
+
+        Закрыть один только описатель недостаточно: программа в терминале
+        продолжает жить, и после набора тестов остаются брошенные процессы.
+        """
         try:
             os.close(self.fd)
         except OSError:
+            pass
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            os.waitpid(self.pid, 0)
+        except (OSError, ChildProcessError):
             pass
 
     @property
@@ -121,3 +142,12 @@ def test_an_ordinary_line_is_untouched(terminal):
     session.type("Обычный вопрос без затей\n")
     session.wait(6.0)
     assert session.questions[:1] == ["Обычный вопрос без затей"]
+
+
+def test_a_paste_does_not_corrupt_the_text_inside_it(terminal):
+    """Обрамление срезается по краям, а не всюду: иначе адрес терял хвост."""
+    session = terminal("--set", "transport.demo_delay=0.2")
+    session.type('\x1b[200~curl "http://x/?v=201~2"\nвторая строка\x1b[201~\n')
+    session.wait(6.0)
+    assert session.questions
+    assert "?v=201~2" in session.questions[0]

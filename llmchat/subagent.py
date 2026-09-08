@@ -91,7 +91,9 @@ def resolve_config(name: str) -> pathlib.Path:
     for candidate in (CONFIGS_DIR / (wanted + ".yaml"), CONFIGS_DIR / (wanted + ".yml"),
                       pathlib.Path(wanted).expanduser()):
         if candidate.is_file():
-            return candidate
+            # Полный путь обязателен: дочерний процесс запускается из каталога
+            # программы, и относительный путь родителя там ведёт не туда.
+            return candidate.resolve()
     raise ConfigError(complain_about(wanted))
 
 

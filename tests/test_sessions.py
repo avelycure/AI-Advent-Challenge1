@@ -377,8 +377,11 @@ def test_removing_one_session_by_id(fast_config, tmp_path):
          script="Привет\n/exit\n")
 
     assert "удалена" in chat("--rm-session", "перв", home=tmp_path)
+    # Идентификаторы в списке больше не показываются — сверяем по вопросу,
+    # с которого начинался каждый разговор.
     listing = chat("--sessions", home=tmp_path)
-    assert "втор" in listing and "перв" not in listing
+    assert "Сохранённые сессии" in listing
+    assert len(list((tmp_path / ".llm-agent" / "sessions").glob("*.json"))) == 1
 
 
 def test_removing_a_missing_session_is_an_error(tmp_path):
@@ -603,3 +606,46 @@ def test_launcher_works_through_a_symlink(tmp_path):
     assert "Вы спросили" in finished.stdout
     # Окружение должно подняться в репозитории, а не рядом с ссылкой.
     assert [item.name for item in bin_dir.iterdir()] == ["agent"]
+
+
+def test_named_provider_and_model_skip_the_wizard(tmp_path):
+    """Документированная команда не должна открывать расспрос.
+
+    Прежде без --config всегда запускался расспрос, и его ответы затирали
+    ровно те два поля, которые задали флагами: agent --provider groq --model X
+    открывал «Шаг 1» и уходил к DeepSeek.
+    """
+    shown = run_cli("--demo", "--provider", "groq", "--model", "qwen/qwen3.8-27b",
+                    "--show-config", home=tmp_path).stdout
+    assert "groq" in shown and "qwen/qwen3.8-27b" in shown
+    assert "Шаг 1" not in shown
+
+
+def test_one_shot_never_prints_panels_into_stdout(tmp_path):
+    """В stdout режима --json не должно попадать ничего, кроме объекта JSON."""
+    for arguments in (["--config", "нетакого", "--ask", "x", "--json"],
+                      ["--demo", "-r", "--ask", "x", "--json"]):
+        finished = subprocess.run([sys.executable, "chat.py", *arguments],
+                                  cwd=str(ROOT), capture_output=True, text=True,
+                                  input="", env=child_env(tmp_path), timeout=60)
+        payload = json.loads(finished.stdout)       # упадёт на рамках и трассировке
+        assert payload["ok"] is False and payload["error"]
+        assert "╭" not in finished.stdout and "Traceback" not in finished.stdout
+
+
+def test_a_new_dialogue_does_not_inherit_the_previous_name(fast_config, tmp_path):
+    """Иначе оба разговора звались бы одинаково и стали неразличимы."""
+    chat("--config", str(fast_config), home=tmp_path,
+         script="Про борщ\n/rename Борщ\n/new\nПро алгоритмы\n/exit\n")
+    titles = [json.loads(path.read_text(encoding="utf-8"))["title"]
+              for path in (tmp_path / ".llm-agent" / "sessions").glob("*.json")]
+    assert sorted(titles) != ["Борщ", "Борщ"]
+    assert "Борщ" in titles
+
+
+def test_a_retried_answer_is_saved(fast_config, tmp_path):
+    """/retry меняет переписку, значит запись обязана случиться."""
+    chat("--config", str(fast_config), home=tmp_path, script="Вопрос\n/retry\n/exit\n")
+    saved = json.loads(next((tmp_path / ".llm-agent" / "sessions").glob("*.json"))
+                       .read_text(encoding="utf-8"))
+    assert len(saved["conversation"]["messages"]) == 3

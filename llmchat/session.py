@@ -20,9 +20,41 @@ __all__ = ["Session", "Message", "DEFAULT_TOPIC"]
 class Session:
     """Обёртка агента для терминального интерфейса."""
 
-    def __init__(self, agent: Agent, topic: str = DEFAULT_TOPIC) -> None:
+    def __init__(self, agent: Agent, topic: str = DEFAULT_TOPIC,
+                 title: str = "") -> None:
         self.agent = agent
         self.topic = topic
+        # Имя сессии — то, по которому человек её узнаёт в списке. Пустое
+        # означает «придумай сам»: имя выводится из темы или первого вопроса.
+        self.title = title
+        # Время последней известной записи. По нему видно, не изменил ли эту
+        # сессию кто-то ещё, пока мы разговаривали.
+        self.seen_at: float = 0.0
+
+    @property
+    def label(self) -> str:
+        """Как называть эту сессию человеку."""
+        return self.title or self.topic or self.first_question or DEFAULT_TOPIC
+
+    @property
+    def first_question(self) -> str:
+        for message in self.messages:
+            if message.role == "user" and not message.note:
+                return " ".join(message.content.split())
+        return ""
+
+    def suggest_title(self) -> str:
+        """Имя, придуманное само: из темы, иначе из первого вопроса.
+
+        Тему придумывает модель в три-пять слов — она и есть лучшее имя. Пока
+        темы нет, годится начало первого вопроса: по нему разговор узнаётся.
+        """
+        if self.topic and self.topic != DEFAULT_TOPIC:
+            return self.topic
+        question = self.first_question
+        if not question:
+            return ""
+        return question[:44].rstrip(" ,.:;—-") + ("…" if len(question) > 44 else "")
 
     # --- конфиг агента, как его видит экран -----------------------------
     @property

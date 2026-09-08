@@ -210,3 +210,22 @@ def test_numbers_are_brought_to_the_declared_type(assignment, path, expected):
     for segment in path.split("."):
         holder = getattr(holder, segment)
     assert holder == expected and type(holder) is type(expected)
+
+
+@pytest.mark.parametrize("assignment,path,expected", [
+    ("input.forbidden=пароль", "input.forbidden", ("пароль",)),
+    ("input.forbidden=[пароль, токен]", "input.forbidden", ("пароль", "токен")),
+    ("tools.enabled=spawn_agent", "tools.enabled", ("spawn_agent",)),
+    ("history.enabled=false", "history.enabled", False),
+])
+def test_a_set_of_values_is_not_torn_into_letters(assignment, path, expected):
+    """Одно значение строкой рассыпалось на буквы, и запрещённой была каждая.
+
+    Заодно проверяется, что «enabled» у истории остался признаком: поля с
+    одинаковым именем в разных разделах уже однажды превратились друг в друга.
+    """
+    config = overrides.apply(BASE, [assignment])
+    holder = config
+    for segment in path.split("."):
+        holder = getattr(holder, segment)
+    assert holder == expected
