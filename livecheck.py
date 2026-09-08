@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,10 @@ LIVE_ONLY = "требует живой модели"
 # а не про агента, поэтому проверка ждёт и пробует снова.
 RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_PAUSE = 8.0
+
+
+# Суммы на экране: «потрачено 511 токенов · 2 запроса · $0.000938».
+MONEY = re.compile(r"\$([0-9]+\.[0-9]+)")
 
 
 def flat(text: str) -> str:
@@ -82,6 +87,12 @@ class Harness:
         self.provider = provider
         self.model = model
         self.throttled = 0
+        # Сколько денег ушло на проверку. Считается по ответам в JSON: у них
+        # цена запроса названа прямо. Диалоговые сценарии сюда не попадают,
+        # поэтому итог — нижняя граница, и так он и подписан.
+        self.spent = 0.0
+        self.counted = 0
+        self.uncounted = 0
         self.homes: List[pathlib.Path] = []
         self.home = self._new_home()
         # Реквизиты в живом режиме нужны настоящие, поэтому окружение
@@ -166,10 +177,35 @@ class Harness:
                 break
             self.throttled += 1
             time.sleep(RATE_LIMIT_PAUSE)
+        self._tally(finished.stdout)
         if check and finished.returncode != 0:
             raise AssertionError("код {}: {}".format(
                 finished.returncode, (finished.stdout + finished.stderr)[-400:]))
         return finished
+
+    def _tally(self, output: str) -> None:
+        """Учесть, во что обошёлся запуск.
+
+        У ответа в JSON цена названа прямо. У диалогового запуска её берём из
+        счётчика внизу экрана: он растёт по ходу разговора, поэтому наибольшая
+        из показанных сумм и есть итог этой сессии.
+        """
+        try:
+            payload = json.loads(output)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            if payload.get("cost") is not None:
+                self.spent += float(payload["cost"])
+                self.counted += 1
+            return
+
+        amounts = [float(found) for found in MONEY.findall(output)]
+        if amounts:
+            self.spent += max(amounts)
+            self.counted += 1
+        else:
+            self.uncounted += 1
 
     def ask_json(self, question: str, *options: str, allow_failure: bool = False) -> dict:
         """Один вопрос с разбором ответа. Вопрос отдельно от флагов: иначе он
@@ -574,6 +610,13 @@ def main(argv=None) -> int:
     elapsed = time.perf_counter() - started
     throttled = ("\n[dim]Отказов по частоте тарифа: {} — переждали и "
                  "повторили.[/]".format(harness.throttled) if harness.throttled else "")
+    if args.live:
+        throttled += ("\n[dim]Потрачено: [bold]${:.4f}[/] по {} измеренным "
+                      "запускам{}.[/]".format(
+                          harness.spent, harness.counted,
+                          "" if not harness.uncounted else
+                          "; ещё {} прошли без показанной цены".format(
+                              harness.uncounted)))
     summary = Text.from_markup(
         "\n[green]{}[/] сошлось · [red]{}[/] не сошлось · [yellow]{}[/] неприменимо "
         "здесь · {:.1f} с{}\n[dim]Режим: {}[/]".format(
