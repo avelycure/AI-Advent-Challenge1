@@ -565,18 +565,18 @@ def test_failed_form_is_flagged_in_the_parent_memory():
     delegation = subagent.run("books-json", "Книги Талеба", parent.config)
     assert delegation.ok and not delegation.valid
 
-    from llmchat.app import delegation_caveat
+    from llmchat.subagent import caveat_of
     parent.record_delegation(delegation.name, delegation.question, delegation.text,
-                             delegation_caveat(delegation))
+                             caveat_of(delegation))
     note = parent.conversation.messages[-1].content
     assert "Оговорка" in note and "не прошёл проверку формы" in note
 
 
 def test_good_form_gets_no_caveat():
-    from llmchat.app import delegation_caveat
+    from llmchat.subagent import caveat_of
     from llmchat.subagent import Delegation
 
-    assert delegation_caveat(Delegation("x", "q", valid=True)) == ""
+    assert caveat_of(Delegation("x", "q", valid=True)) == ""
 
 
 def test_launcher_works_through_a_symlink(tmp_path):

@@ -25,6 +25,8 @@ class AgentResult:
     attempts: int = 1
     scores: Dict[str, int] = field(default_factory=dict)
     judge_note: str = ""
+    # Инструменты, которые модель вызвала сама по ходу ответа.
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     finish_reason: str = "stop"
     # Параметры, которые провайдер не принял и которые пришлось убрать.
     dropped_params: List[str] = field(default_factory=list)
@@ -81,6 +83,10 @@ class AgentResult:
             ]
         if self.scores:
             payload["scores"] = self.scores
+        if self.tool_calls:
+            payload["tool_calls"] = [
+                {"name": call.get("name"), "ok": call.get("ok"),
+                 "arguments": call.get("arguments")} for call in self.tool_calls]
         if self.dropped_params:
             payload["dropped_params"] = self.dropped_params
         if self.notes:

@@ -508,6 +508,9 @@ def chat_loop(console: Console, keys, session: Session,
             session.drop_last_user()
             continue
 
+        for call in result.tool_calls:
+            console.print(subagent.tool_panel(call))
+
         if should_update_topic(session):
             with console.status("[dim]Определяю тему диалога…[/]", spinner="dots"):
                 update_topic(session)
@@ -545,24 +548,13 @@ def delegate(console: Console, session: Session, argument: str) -> RenderableTyp
 
     if delegation.ok:
         session.agent.record_delegation(delegation.name, delegation.question,
-                                        delegation.text, delegation_caveat(delegation))
+                                        delegation.text,
+                                        subagent.caveat_of(delegation))
         session.agent.absorb_delegation(delegation.prompt_tokens,
                                         delegation.completion_tokens,
                                         delegation.seconds, delegation.cost,
                                         delegation.currency)
     return subagent.panel(delegation)
-
-
-def delegation_caveat(delegation) -> str:
-    """Оговорка к ответу под-агента, которую надо донести и до модели."""
-    if delegation.valid:
-        return ""
-    failed = [str(check.get("name")) for check in delegation.checks
-              if not check.get("passed")]
-    return ("ответ не прошёл проверку формы за {} {}{}".format(
-        delegation.attempts,
-        plural(delegation.attempts, ("попытку", "попытки", "попыток")),
-        ": " + ", ".join(failed[:2]) if failed else ""))
 
 
 def request_answer(console: Console, session: Session, ask=None):
@@ -800,7 +792,8 @@ def agent_from_config(console: Console, config: AgentConfig, store,
     его прошли бы сто конфигов в массовом прогоне. Человека тревожат только
     тогда, когда ключа нет ни в конфиге, ни в окружении, ни в файле.
     """
-    agent = Agent(config, session_id=session_id)
+    agent = Agent(config, session_id=session_id,
+                  toolbox=subagent.toolbox_for(config))
     try:
         agent.credentials
         return agent
@@ -812,8 +805,8 @@ def agent_from_config(console: Console, config: AgentConfig, store,
             title="Нужен реквизит", style="yellow"))
     provider = config.provider_info
     credentials = store.ready_for(console, provider)
-    return Agent(config.with_changes(api_key=credentials.key, api_extra=credentials.extra),
-                 session_id=session_id)
+    ready = config.with_changes(api_key=credentials.key, api_extra=credentials.extra)
+    return Agent(ready, session_id=session_id, toolbox=subagent.toolbox_for(ready))
 
 
 def one_shot(args: argparse.Namespace, record: Optional[SessionRecord],
@@ -840,10 +833,11 @@ def one_shot(args: argparse.Namespace, record: Optional[SessionRecord],
         return code
 
     try:
+        toolbox = subagent.toolbox_for(config)
         if record is not None:
-            agent = restore_agent(record, config)
+            agent = restore_agent(record, config, toolbox=toolbox)
         else:
-            agent = Agent(config, session_id=args.session_id)
+            agent = Agent(config, session_id=args.session_id, toolbox=toolbox)
         # Реквизиты ищем сразу, а не при первом запросе: у отсутствия ключа
         # должен быть свой код возврата, иначе вызывающий не отличит его от
         # отказа провайдера и станет повторять безнадёжный вызов.
@@ -944,7 +938,7 @@ def seed_credentials(agent: Agent, keys) -> Agent:
 def build_agent(console: Console, args: argparse.Namespace, sessions: SessionStore,
                 keys, record: Optional[SessionRecord], config: AgentConfig) -> Agent:
     if record is not None:
-        agent = restore_agent(record, config)
+        agent = restore_agent(record, config, toolbox=subagent.toolbox_for(config))
         console.print(returned_panel(record, agent))
         return agent
 
@@ -952,8 +946,9 @@ def build_agent(console: Console, args: argparse.Namespace, sessions: SessionSto
     if args.config:
         show_banner(console)
         return agent_from_config(console, config, keys, session_id)
-    return Agent(setup(console, args.demo, ask_keys=args.ask_keys, store=keys,
-                       base=config), session_id=session_id)
+    chosen = setup(console, args.demo, ask_keys=args.ask_keys, store=keys, base=config)
+    return Agent(chosen, session_id=session_id,
+                 toolbox=subagent.toolbox_for(chosen))
 
 
 def check_session_id(session_id: Optional[str], sessions: SessionStore) -> Optional[str]:

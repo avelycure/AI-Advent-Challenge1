@@ -16,12 +16,13 @@ from typing import Any, Dict, List, Optional
 from . import judge as judging
 from . import policies
 from .config import DEFAULT_CONFIG, AgentConfig
-from .errors import OutputRejected
+from .errors import LLMError, OutputRejected
 from .history import Conversation
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
-from .transport import Completion, count_message_tokens, request_cost
-from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, UsageMeter
+from .tools import Toolbox, ToolOutcome
+from .transport import Completion, ToolCall, count_message_tokens, request_cost
+from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, TOOL, UsageMeter
 
 
 class Agent:
@@ -29,7 +30,8 @@ class Agent:
 
     def __init__(self, config: AgentConfig = DEFAULT_CONFIG, *,
                  registry: Optional[ClientRegistry] = None, client: Any = None,
-                 session_id: Optional[str] = None) -> None:
+                 session_id: Optional[str] = None,
+                 toolbox: Optional[Toolbox] = None) -> None:
         # Проверяем конфиг сразу: неверный провайдер должен обнаружиться при
         # создании агента, а не на первом запросе где-то в глубине транспорта.
         config.resolve()
@@ -44,6 +46,13 @@ class Agent:
         self.usage = UsageMeter()
         self.conversation = Conversation(keep_last_answer=config.history.keep_last_answer)
         self._judge_agent: Optional["Agent"] = None
+        # Что инструменты делают — приносит вызывающий, какие включены —
+        # говорит конфиг. Несовпадение выясняется сразу, а не на первом ответе.
+        #
+        # Полный набор храним отдельно от включённого: инструменты можно
+        # включить прямо в разговоре, и отбирать тогда было бы уже не из чего.
+        self._all_tools = toolbox or Toolbox()
+        self._toolbox = self._all_tools.only(config.tools.enabled)
 
     # --- конфиг ---------------------------------------------------------
     @property
@@ -79,6 +88,8 @@ class Agent:
             self._credentials = None
         if "judge" in changes:
             self._judge_agent = None
+        if "tools" in changes:
+            self._toolbox = self._all_tools.only(updated.tools.enabled)
         return updated
 
     # --- транспорт ------------------------------------------------------
@@ -246,15 +257,23 @@ class Agent:
         messages.append({"role": "user", "content": text})
         return messages
 
+    @property
+    def toolbox(self) -> Toolbox:
+        return self._toolbox
+
     def _call(self, messages: List[Dict[str, str]], kind: str,
               max_tokens: Optional[int] = None, temperature: Optional[float] = None,
               stop: Optional[List[str]] = None,
-              response_format: Optional[Dict[str, str]] = None) -> Completion:
+              response_format: Optional[Dict[str, str]] = None,
+              tools: Optional[List[Dict[str, object]]] = None) -> Completion:
         """Обращение к провайдеру с проверкой бюджета и записью расхода."""
         params = self._config.generation
         reserve = max_tokens if max_tokens is not None else self.output_reserve
         provider, model = self._config.resolve()
 
+        # Незнакомое поле передаём только когда оно нужно: клиент без
+        # поддержки инструментов должен работать как прежде.
+        extra = {"tools": tools} if tools else {}
         planned_input = count_message_tokens(messages)
         self.usage.check(
             self._config.budget,
@@ -272,9 +291,63 @@ class Agent:
             response_format=(self._config.output.response_format
                              or params.response_format_arg) if response_format is None
             else response_format,
+            **extra,
         )
         completion.cost = self.usage.record(completion, provider, model, kind)
         return completion
+
+    def _use_tools(self, transcript: List[Dict[str, object]],
+                   invocations: List[Dict[str, object]]) -> Completion:
+        """Спрашивать модель, пока она просит вызвать инструменты.
+
+        Один круг — модель просит вызов, мы выполняем и возвращаем результат.
+        Кругов не больше, чем позволяет конфиг: модель может звать инструмент
+        без конца, и предел здесь единственная защита от бесконечного разговора.
+
+        На последнем круге инструменты не предлагаются вовсе, а модели прямо
+        сказано, что вызовы кончились. Предлагать то, чем уже нельзя
+        пользоваться, значило бы выпрашивать пустой ответ.
+        """
+        limit = self._config.tools.max_calls
+        definitions = self._toolbox.definitions()
+        for circle in range(limit + 1):
+            last = circle >= limit
+            if last:
+                transcript.append({
+                    "role": "user",
+                    "content": TOOL_LIMIT_REACHED.format(limit=limit)})
+            completion = self._call(transcript, kind=MAIN if not circle else TOOL,
+                                    tools=None if last else definitions)
+            if last or not completion.tool_calls:
+                return completion
+
+            transcript.append(_assistant_asking(completion))
+            for call in completion.tool_calls:
+                outcome = self._toolbox.run(call.name, call.arguments)
+                self._absorb_tool_usage(outcome)
+                invocations.append({"name": call.name, "arguments": call.arguments,
+                                    "ok": outcome.ok, "text": outcome.text,
+                                    "detail": outcome.detail})
+                transcript.append({"role": "tool", "tool_call_id": call.identifier,
+                                   "content": outcome.text})
+        return completion
+
+    def _absorb_tool_usage(self, outcome: ToolOutcome) -> None:
+        """Учесть расход инструмента, если он сам обращался к модели.
+
+        Под-агент, запущенный инструментом, платит из того же кошелька, и его
+        траты обязаны попасть в общий счёт — ровно так же, как когда его зовёт
+        человек командой.
+        """
+        spent = outcome.usage
+        if not spent:
+            return
+        self.usage.record_external(
+            int(spent.get("prompt_tokens", 0) or 0),
+            int(spent.get("completion_tokens", 0) or 0),
+            float(spent.get("seconds", 0.0) or 0.0),
+            spent.get("cost"), str(spent.get("currency", "USD")),
+            kind=SUB, requests=int(spent.get("requests", 1) or 1))
 
     def _answer(self, messages: List[Dict[str, str]]) -> AgentResult:
         """Спросить модель и, если форма не соблюдена, переспросить."""
@@ -295,9 +368,14 @@ class Agent:
         prompt_tokens = completion_tokens = reasoning_tokens = 0
         cost: Optional[float] = None
 
+        invocations: List[Dict[str, object]] = []
         while attempt < policy.max_attempts:
             attempt += 1
-            completion = self._call(transcript, kind=MAIN if attempt == 1 else REPAIR)
+            if self._toolbox and attempt == 1:
+                completion = self._use_tools(transcript, invocations)
+            else:
+                completion = self._call(transcript,
+                                        kind=MAIN if attempt == 1 else REPAIR)
             spent_seconds += completion.elapsed
             prompt_tokens += completion.prompt_tokens
             completion_tokens += completion.completion_tokens
@@ -322,6 +400,14 @@ class Agent:
             ]
 
         text = policies.clean_output(policy, completion.text)
+        if not text:
+            # Пустой ответ после работы с инструментами — не годный ответ.
+            # Молча отдать пустоту хуже, чем сказать, что случилось.
+            raise LLMError(
+                "модель так и не дала текстового ответа: она просила вызывать "
+                "инструменты и уложилась в предел {}, но словами не ответила. "
+                "Поднимите tools.max_calls или отключите инструменты.".format(
+                    self._config.tools.max_calls))
         if policy.require_valid and not validation.ok:
             raise OutputRejected("ответ не прошёл проверку за {} {}: {}".format(
                 attempt, "попытку" if attempt == 1 else "попытки",
@@ -333,7 +419,7 @@ class Agent:
             finish_reason=completion.finish_reason, dropped_params=dropped, notes=notes,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             reasoning_tokens=reasoning_tokens, seconds=spent_seconds,
-            cost=cost, currency=model.currency,
+            cost=cost, currency=model.currency, tool_calls=invocations,
         )
 
         if self._config.history.enabled:
@@ -423,6 +509,24 @@ class Agent:
         """
         provider, model = self._config.resolve()
         self.usage.record(completion, provider, model, SIDE)
+
+
+TOOL_LIMIT_REACHED = (
+    "Предел вызовов инструментов исчерпан ({limit}). Больше вызывать нельзя — "
+    "ответь тем, что уже известно, или скажи, чего не хватило.")
+
+
+def _assistant_asking(completion: Completion) -> Dict[str, object]:
+    """Сообщение модели с её просьбой о вызовах — так, как ждёт провайдер."""
+    return {
+        "role": "assistant",
+        "content": completion.text or None,
+        "tool_calls": [
+            {"id": call.identifier, "type": "function",
+             "function": {"name": call.name, "arguments": call.arguments}}
+            for call in completion.tool_calls
+        ],
+    }
 
 
 def _add(current: Optional[float], addition: Optional[float]) -> Optional[float]:

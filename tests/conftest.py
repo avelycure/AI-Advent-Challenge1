@@ -31,11 +31,12 @@ class ScriptedClient:
         return None
 
     def complete(self, model_ref: str, messages, max_tokens: int, temperature: float = 0.7,
-                 top_p: Optional[float] = None, stop=None, response_format=None) -> Completion:
+                 top_p: Optional[float] = None, stop=None, response_format=None,
+                 tools=None) -> Completion:
         self.calls.append([dict(m) for m in messages])
         self.kwargs.append({"model_ref": model_ref, "max_tokens": max_tokens,
                             "temperature": temperature, "top_p": top_p, "stop": stop,
-                            "response_format": response_format})
+                            "response_format": response_format, "tools": tools})
         index = min(len(self.calls) - 1, len(self.replies) - 1)
         text = self.replies[index]
         return Completion(text, count_message_tokens(messages), count_text_tokens(text),
@@ -53,6 +54,41 @@ class FailingClient:
 
     def complete(self, *args, **kwargs):
         raise self.error
+
+
+class ToolCallingClient:
+    """Модель, которая зовёт инструмент, пока он предложен, и потом отвечает.
+
+    Настоящий провайдер не может попросить вызов, когда инструменты ему не
+    предложены, — заглушка ведёт себя так же, иначе проверка предела кругов
+    мерила бы небывалое.
+    """
+
+    def __init__(self, name: str, arguments: str, answer: str = "Готово.",
+                 rounds: int = 99) -> None:
+        self.name = name
+        self.arguments = arguments
+        self.answer = answer
+        self.rounds = rounds
+        self.offered: List[bool] = []
+        self.calls: List[List[Dict[str, object]]] = []
+
+    def validate_key(self) -> None:
+        return None
+
+    def complete(self, model_ref: str, messages, max_tokens: int, temperature: float = 0.7,
+                 top_p: Optional[float] = None, stop=None, response_format=None,
+                 tools=None) -> Completion:
+        from llmagent.transport import ToolCall
+
+        self.offered.append(bool(tools))
+        self.calls.append([dict(m) for m in messages])
+        asked = sum(1 for flag in self.offered if flag)
+        if tools and asked <= self.rounds:
+            return Completion("", count_message_tokens(messages), 5, elapsed=0.001,
+                              tool_calls=[ToolCall("call-1", self.name, self.arguments)])
+        return Completion(self.answer, count_message_tokens(messages),
+                          count_text_tokens(self.answer), elapsed=0.001)
 
 
 # --------------------------------------------------------------------------
@@ -76,6 +112,23 @@ def child_env(home) -> Dict[str, str]:
                              "передайте tmp_path")
     return {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(ROOT), "TERM": "dumb",
             "COLUMNS": "120", "HOME": str(home)}
+
+
+@pytest.fixture(autouse=True)
+def no_provider_keys_in_the_environment(monkeypatch):
+    """Убрать реквизиты провайдеров из окружения на время теста.
+
+    Ни один тест не должен полагаться на то, есть ли ключ у запускающего.
+    Оболочка легко передаёт его дальше — так один тест начал находить
+    настоящий ключ и перестал проверять то, ради чего написан. А в худшем
+    случае найденный ключ уводит проверку в платный запрос.
+    """
+    from llmagent.registry import EXTRA_ENV
+    from llmagent.transport import PROVIDERS
+
+    for provider in PROVIDERS.values():
+        monkeypatch.delenv(provider.api_key_env, raising=False)
+    monkeypatch.delenv(EXTRA_ENV, raising=False)
 
 
 @pytest.fixture(scope="session", autouse=True)

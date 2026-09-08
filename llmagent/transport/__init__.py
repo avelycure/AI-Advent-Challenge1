@@ -3,7 +3,7 @@
 Слой ничего не знает ни об агенте, ни о интерфейсе: он умеет отправить готовые
 сообщения выбранной модели и вернуть ответ с измерениями.
 """
-from .client import Completion, LLMClient, LLMError, make_client
+from .client import Completion, LLMClient, LLMError, ToolCall, make_client
 from .providers import (
     PROVIDER_ORDER,
     PROVIDERS,
@@ -21,7 +21,7 @@ from .tokens import (
 )
 
 __all__ = [
-    "Completion", "LLMClient", "LLMError", "make_client",
+    "Completion", "LLMClient", "LLMError", "ToolCall", "make_client",
     "PROVIDERS", "PROVIDER_ORDER", "ModelInfo", "ProviderInfo", "request_cost",
     "SecretSource", "find_sources", "mask", "shorten",
     "count_message_tokens", "count_text_tokens", "tokenizer_name",

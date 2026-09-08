@@ -49,8 +49,10 @@ RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_PAUSE = 8.0
 
 
-# Суммы на экране: «потрачено 511 токенов · 2 запроса · $0.000938».
-MONEY = re.compile(r"\$([0-9]+\.[0-9]+)")
+# Трата сессии на экране: «потрачено 511 токенов · 2 запроса · $0.000938».
+# Привязка к слову обязательна: в выводе есть и другие суммы — например
+# цена модели за миллион токенов, — и без привязки за трату принималась она.
+MONEY = re.compile(r"потрачено[^$\n]{0,80}\$([0-9]+\.[0-9]+)")
 
 
 def flat(text: str) -> str:
@@ -230,16 +232,33 @@ class Harness:
 
 
 def real_key_files() -> dict:
-    """Переменные окружения с ключами, собранные из файлов настоящего дома."""
+    """Ключи провайдеров из настоящего домашнего каталога.
+
+    Настоящего — то есть взятого из системной записи пользователя, а не из
+    переменной ``HOME``. Проверка подменяет её каждому сценарию, и если бы
+    ключи искались по ней, живой режим остался бы без реквизитов.
+    """
+    import os
+    import pwd
+
     from llmagent.transport import PROVIDER_ORDER, PROVIDERS, find_sources
 
-    found = {}
-    for key in PROVIDER_ORDER:
-        provider = PROVIDERS[key]
-        sources = find_sources(provider.api_key_env, provider.key_files)
-        if sources:
-            found[provider.api_key_env] = sources[0].value
-    return found
+    real_home = pwd.getpwuid(os.getuid()).pw_dir
+    saved = os.environ.get("HOME")
+    os.environ["HOME"] = real_home
+    try:
+        found = {}
+        for key in PROVIDER_ORDER:
+            provider = PROVIDERS[key]
+            sources = find_sources(provider.api_key_env, provider.key_files)
+            if sources:
+                found[provider.api_key_env] = sources[0].value
+        return found
+    finally:
+        if saved is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved
 
 
 # --------------------------------------------------------------------------
@@ -449,6 +468,25 @@ def subagent_isolated(harness: Harness) -> Outcome:
         harness.other_model()) if ok else "правка не применилась: " + shown[-140:])
 
 
+@scenario("под-агент", "модель сама решает позвать под-агента", live_only=True)
+def tool_calling(harness: Harness) -> Outcome:
+    """Инструменты проверяются только живьём: решение принимает модель."""
+    payload = harness.ask_json(
+        "Дай ровно пять книг Нассима Талеба строгим JSON по схеме",
+        "--config", "orchestrator", allow_failure=True)
+    calls = payload.get("tool_calls") or []
+    if not payload.get("ok"):
+        return Outcome(False, "запрос не удался: {}".format(
+            payload.get("error", ""))[:110])
+    if not calls:
+        return Outcome(False, "модель не позвала под-агента, ответила сама")
+    spent = payload.get("usage", {}).get("by_kind", {})
+    return Outcome("под-агент" in spent,
+                   "вызов {} ({}) · расход по видам: {}".format(
+                       calls[0]["name"], "ок" if calls[0]["ok"] else "неудача",
+                       ", ".join(sorted(spent))))
+
+
 @scenario("бюджет", "потолок трат останавливает запрос")
 def budget(harness: Harness) -> Outcome:
     shown = flat(harness.run("--set", "budget.max_requests=1",
@@ -574,6 +612,14 @@ def main(argv=None) -> int:
             return 2
         provider_key = provider.key
         model_id = args.model or provider.default_model.id
+        if provider.api_key_env not in real_key_files():
+            console.print(Panel(
+                Text("Нет ключа для {}: положите его в {} или задайте {}.".format(
+                    provider.name, " либо ".join(provider.key_files),
+                    provider.api_key_env), style="red"),
+                title="⚠ Живой прогон невозможен", border_style="red",
+                box=box.ROUNDED))
+            return 2
         if not args.yes and not confirm_live(console, len(chosen) * 3, provider, model_id):
             console.print("[dim]Отменено — денег не потрачено.[/]")
             return 0

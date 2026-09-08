@@ -35,6 +35,17 @@ class HttpProblem(Exception):
 
 
 @dataclass
+class ToolCall:
+    """Просьба модели вызвать инструмент."""
+
+    identifier: str
+    name: str
+    # Аргументы приходят строкой JSON: модель их сочиняет, и они могут быть
+    # неразбираемы. Разбирать их — дело того, кто вызывает инструмент.
+    arguments: str = "{}"
+
+
+@dataclass
 class Completion:
     text: str
     prompt_tokens: int
@@ -59,6 +70,9 @@ class Completion:
     # Стоимость запроса. Заполняет счётчик агента: цена живёт в каталоге
     # моделей, а не в транспорте, и до записи в счётчик она неизвестна.
     cost: Optional[float] = None
+    # Инструменты, которые модель просит вызвать. Пока список не пуст,
+    # ответа как такового ещё нет.
+    tool_calls: List[ToolCall] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -108,6 +122,12 @@ def describe_error(exc: Exception) -> str:
         return ("Вместо ответа API пришла HTML-страница — запрос перехватил прокси "
                 "или фильтр сети. Добавьте адрес провайдера в NO_PROXY либо "
                 "отключите прокси для него.")
+    if "tool calling" in lowered and "not supported" in lowered:
+        # Инструменты умеют не все модели, и сырой отказ провайдера этого не
+        # объясняет. Молча убрать их нельзя: агент перестал бы делать то, что
+        # записано в его конфиге, а человек не узнал бы почему.
+        return ("Эта модель не умеет вызывать инструменты. Выберите другую модель "
+                "или уберите их из конфига: --set tools.enabled=[]")
     if "incorrect api key" in lowered:
         # xAI отвечает на неверный ключ кодом 400, а не 401, как остальные.
         return "Ключ отклонён провайдером. Проверьте его в консоли console.x.ai."
@@ -211,7 +231,8 @@ def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> Tuple[bool, 
         return False, []
 
     reported: List[str] = []
-    for name in ("response_format", "stop", "top_p", "temperature"):
+    for name in ("response_format", "stop", "top_p", "temperature", "tools",
+                 "tool_choice"):
         if name in kwargs and _mentioned(name, text):
             kwargs.pop(name)
             reported.append(name)
@@ -225,6 +246,32 @@ def _drop_unsupported(exc: Exception, kwargs: Dict[str, object]) -> Tuple[bool, 
         if not extra:
             kwargs.pop("extra_body")
     return changed, reported
+
+
+def _tool_calls_of(message: object) -> List[ToolCall]:
+    """Вытащить просьбы вызвать инструмент из ответа модели.
+
+    SDK отдаёт их объектами, часть прокси — словарями, поэтому читаем оба вида:
+    иначе на прокси инструменты молча перестали бы работать.
+    """
+    raw = getattr(message, "tool_calls", None)
+    if raw is None and isinstance(message, dict):
+        raw = message.get("tool_calls")
+    calls: List[ToolCall] = []
+    for item in raw or []:
+        function = item.get("function") if isinstance(item, dict) else getattr(
+            item, "function", None)
+        if function is None:
+            continue
+        name = (function.get("name") if isinstance(function, dict)
+                else getattr(function, "name", "")) or ""
+        arguments = (function.get("arguments") if isinstance(function, dict)
+                     else getattr(function, "arguments", "")) or "{}"
+        identifier = (item.get("id") if isinstance(item, dict)
+                      else getattr(item, "id", "")) or name
+        if name:
+            calls.append(ToolCall(identifier, name, arguments))
+    return calls
 
 
 def _usage_detail(usage: object, group: str, name: str) -> int:
@@ -321,6 +368,7 @@ class LLMClient:
         top_p: Optional[float] = None,
         stop: Optional[List[str]] = None,
         response_format: Optional[Dict[str, str]] = None,
+        tools: Optional[List[Dict[str, object]]] = None,
     ) -> Completion:
         self._prepare()
         kwargs = {
@@ -335,6 +383,8 @@ class LLMClient:
             kwargs["stop"] = stop
         if response_format:
             kwargs["response_format"] = response_format
+        if tools:
+            kwargs["tools"] = tools
         # SDK не пропускает незнакомые ему поля как обычные аргументы,
         # поэтому специфичные для провайдера кладём в тело запроса напрямую.
         extra_body = self.provider.extra_body_for(model_ref)
@@ -363,7 +413,10 @@ class LLMClient:
 
         choice = response.choices[0]
         text = (choice.message.content or "").strip()
-        if not text:
+        tool_calls = _tool_calls_of(choice.message)
+        # Пустой текст — не ошибка, когда модель просит вызвать инструмент:
+        # ответа ещё нет, и он появится после того, как инструмент отработает.
+        if not text and not tool_calls:
             raise LLMError("Модель вернула пустой текст ответа.")
         finish_reason = getattr(choice, "finish_reason", "stop") or "stop"
 
@@ -387,7 +440,8 @@ class LLMClient:
             prompt_tokens = count_message_tokens(messages)
             completion_tokens = count_text_tokens(text)
         return Completion(text, prompt_tokens, completion_tokens, finish_reason, dropped,
-                          notes, elapsed, reasoning_tokens, cached_tokens)
+                          notes, elapsed, reasoning_tokens, cached_tokens,
+                          tool_calls=tool_calls)
 
 
 class GigaChatAuth:
@@ -521,6 +575,7 @@ class DemoClient:
         top_p: Optional[float] = None,
         stop: Optional[List[str]] = None,
         response_format: Optional[Dict[str, str]] = None,
+        tools: Optional[List[Dict[str, object]]] = None,
     ) -> Completion:
         started = time.perf_counter()
         self._pause(1.2, 2.2)

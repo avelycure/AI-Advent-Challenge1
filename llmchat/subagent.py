@@ -25,7 +25,15 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from llmagent import AgentConfig, ConfigError, overrides
+from llmagent import (
+    AgentConfig,
+    ConfigError,
+    ToolOutcome,
+    Toolbox,
+    overrides,
+    spawn_agent_spec,
+)
+from llmagent.tools import USAGE_KEY
 from llmagent.registry import EXTRA_ENV
 
 from .ui import fmt, format_cost, format_seconds
@@ -206,7 +214,13 @@ def parse(name: str, question: str, finished: "subprocess.CompletedProcess") -> 
 # Показ
 # --------------------------------------------------------------------------
 
-def panel(delegation: Delegation) -> RenderableType:
+def panel(delegation: Delegation, remembered: bool = True) -> RenderableType:
+    """Показать итог под-агента.
+
+    ``remembered`` говорит, попал ли ответ в память сессии отдельной заметкой.
+    Когда под-агента позвала модель сама, заметки нет: содержимое несёт её
+    собственный ответ, и обещать иное было бы неправдой.
+    """
     if not delegation.ok:
         return Panel(
             Text(delegation.error or "", style="red"),
@@ -233,11 +247,79 @@ def panel(delegation: Delegation) -> RenderableType:
     body = Text(delegation.text.strip() or "(пусто)")
     hint = Text.from_markup(
         "\n[dim]Ответ принят в память этой сессии — на него можно ссылаться "
-        "следующим вопросом.[/]")
+        "следующим вопросом.[/]" if remembered else
+        "\n[dim]Этот ответ модель получила себе и учла в своём. Отдельной "
+        "заметки в памяти нет.[/]")
     accent = "green" if delegation.valid else "yellow"
     return Panel(Group(facts, Text(""), body, hint),
                  title="⤷ Под-агент [bold]{}[/]".format(delegation.name),
                  title_align="left", border_style=accent, box=box.ROUNDED, padding=(0, 1))
+
+
+# --------------------------------------------------------------------------
+# Инструмент для модели
+# --------------------------------------------------------------------------
+
+def toolbox_for(parent: AgentConfig) -> Toolbox:
+    """Набор инструментов агента: пока в нём один — запуск под-агента.
+
+    Что инструмент делает, знает интерфейс: под-агент идёт отдельным процессом.
+    Какие инструменты включены — говорит конфиг агента.
+    """
+    def handler(arguments: Dict[str, object]) -> ToolOutcome:
+        name = str(arguments.get("config", "")).strip()
+        question = str(arguments.get("question", "")).strip()
+        if not name or not question:
+            return ToolOutcome(
+                "Нужны оба поля: config (имя конфига) и question (вопрос).", ok=False)
+
+        delegation = run(name, question, parent)
+        if not delegation.ok:
+            return ToolOutcome("Под-агент не справился: {}".format(delegation.error),
+                               ok=False, detail={"delegation": delegation})
+        answer = delegation.text
+        if not delegation.valid:
+            answer += "\n\n(Оговорка: {})".format(caveat_of(delegation))
+        return ToolOutcome(answer, detail={"delegation": delegation,
+                                           USAGE_KEY: spending_of(delegation)})
+
+    return Toolbox([spawn_agent_spec(available(), handler)])
+
+
+def spending_of(delegation: Delegation) -> Dict[str, object]:
+    """Расход под-агента в общем для инструментов виде."""
+    return {"prompt_tokens": delegation.prompt_tokens,
+            "completion_tokens": delegation.completion_tokens,
+            "seconds": delegation.seconds, "cost": delegation.cost,
+            "currency": delegation.currency, "requests": 1}
+
+
+def caveat_of(delegation: Delegation) -> str:
+    """Оговорка к ответу под-агента, которую надо донести и до модели."""
+    if delegation.valid:
+        return ""
+    failed = [str(check.get("name")) for check in delegation.checks
+              if not check.get("passed")]
+    return "ответ не прошёл проверку формы за {} попыток{}".format(
+        delegation.attempts, ": " + ", ".join(failed[:2]) if failed else "")
+
+
+def tool_panel(call: Dict[str, object]) -> RenderableType:
+    """Показать, что модель вызвала инструмент сама."""
+    delegation = (call.get("detail") or {}).get("delegation")
+    if isinstance(delegation, Delegation):
+        inner = panel(delegation, remembered=False)
+        title = "🔧 Модель сама вызвала под-агента [bold]{}[/]".format(delegation.name)
+        return Panel(inner, title=title, title_align="left",
+                     border_style="cyan" if call.get("ok") else "yellow",
+                     box=box.ROUNDED, padding=(0, 1))
+
+    body = Text(str(call.get("text", ""))[:400],
+                style="" if call.get("ok") else "yellow")
+    return Panel(body, title="🔧 Модель вызвала [bold]{}[/]".format(call.get("name")),
+                 title_align="left",
+                 border_style="cyan" if call.get("ok") else "yellow",
+                 box=box.ROUNDED, padding=(0, 1))
 
 
 def catalog_panel() -> RenderableType:

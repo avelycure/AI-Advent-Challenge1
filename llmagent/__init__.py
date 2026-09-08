@@ -20,6 +20,7 @@ from .config import (
     InputPolicy,
     JudgeConfig,
     OutputPolicy,
+    ToolPolicy,
     Transport,
 )
 from .errors import (
@@ -39,6 +40,7 @@ from .overrides import append_system_prompt
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .store import SessionNotFound, SessionRecord, SessionStore, restore_agent
+from .tools import SPAWN_AGENT, Toolbox, ToolOutcome, ToolSpec, spawn_agent_spec
 from .spawn import build_agents, matrix, spawn, spawn_sync, summarize
 from .usage import UsageMeter
 
@@ -47,6 +49,7 @@ __version__ = "2.0.0"
 __all__ = [
     "Agent", "AgentConfig", "AgentResult", "DEFAULT_CONFIG", "SYSTEM_PROMPT",
     "InputPolicy", "OutputPolicy", "JudgeConfig", "HistoryConfig", "Budget", "Transport",
+    "ToolPolicy", "Toolbox", "ToolSpec", "ToolOutcome", "spawn_agent_spec", "SPAWN_AGENT",
     "GenerationParams", "Schema", "Field", "Check", "Validation",
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",
     "Conversation", "Message", "UsageMeter",

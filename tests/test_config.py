@@ -143,13 +143,16 @@ def test_shipped_configs_actually_answer(path):
     прекрасно загружался, а падал только при первом ответе.
     """
     from llmagent import Agent, Transport
+    from llmchat.subagent import toolbox_for
 
     from conftest import ScriptedClient
 
     config = AgentConfig.from_file(str(path)).with_changes(
         transport=Transport(demo=True, demo_delay=0.0))
     # Второй ответ — на случай судьи или переспроса по выходной политике.
-    agent = Agent(config, client=ScriptedClient(
+    # Набор инструментов настоящий: конфиг может их включать, и тогда без
+    # набора он бы не собрался — а проверять надо годность конфига.
+    agent = Agent(config, toolbox=toolbox_for(config), client=ScriptedClient(
         ['{"items": []}', "полнота: 4\nясность: 4\nобоснованность: 4"]))
     result = agent.ask("Проверочный вопрос")
     assert result.text

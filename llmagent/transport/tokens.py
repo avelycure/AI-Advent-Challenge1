@@ -46,6 +46,10 @@ def _heuristic(text: str) -> int:
 
 
 def count_text_tokens(text: str) -> int:
+    if not text:
+        # Пустое содержимое бывает у сообщения, которое несёт только просьбу
+        # вызвать инструмент: текста в нём нет, и это не ошибка.
+        return 0
     encoder = _get_encoder()
     if encoder is not None:
         try:
@@ -55,10 +59,22 @@ def count_text_tokens(text: str) -> int:
     return _heuristic(text)
 
 
-def count_message_tokens(messages: List[Dict[str, str]]) -> int:
+def count_message_tokens(messages: List[Dict[str, object]]) -> int:
+    """Оценка объёма сообщений, включая просьбы вызвать инструмент.
+
+    Имя инструмента и его аргументы уходят в запрос и стоят токенов, поэтому
+    считаются наравне с текстом: без них оценка занижалась бы тем сильнее,
+    чем больше модель пользуется инструментами.
+    """
     total = CONVERSATION_OVERHEAD
     for message in messages:
-        total += count_text_tokens(message.get("content", "")) + MESSAGE_OVERHEAD
+        content = message.get("content") or ""
+        total += count_text_tokens(content if isinstance(content, str)
+                                   else str(content)) + MESSAGE_OVERHEAD
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            total += count_text_tokens(str(function.get("name", "")))
+            total += count_text_tokens(str(function.get("arguments", "")))
     return total
 
 

@@ -134,6 +134,28 @@ class JudgeConfig:
 
 
 @dataclass(frozen=True)
+class ToolPolicy:
+    """Инструменты, которые модель вправе вызывать сама.
+
+    Пустой список означает, что модель об инструментах не узнает: поле в
+    запрос не уйдёт, и она ответит своими словами.
+    """
+
+    enabled: Tuple[str, ...] = ()
+    # Сколько кругов «модель просит вызов — мы отвечаем результатом» допустимо
+    # за один ответ. Предел нужен: модель может звать инструмент без конца.
+    max_calls: int = 4
+
+    def __post_init__(self) -> None:
+        if self.max_calls < 1:
+            raise ConfigError("tools.max_calls: минимум 1")
+
+    @property
+    def on(self) -> bool:
+        return bool(self.enabled)
+
+
+@dataclass(frozen=True)
 class HistoryConfig:
     enabled: bool = True
     # Из подряд идущих ответов в запрос уходит только последний.
@@ -174,6 +196,7 @@ class AgentConfig:
     input: InputPolicy = field(default_factory=InputPolicy)
     output: OutputPolicy = field(default_factory=OutputPolicy)
     judge: Optional[JudgeConfig] = None
+    tools: ToolPolicy = field(default_factory=ToolPolicy)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     budget: Budget = field(default_factory=Budget)
     transport: Transport = field(default_factory=Transport)
@@ -300,7 +323,7 @@ def _from_plain(target: type, payload: Any) -> Any:
     for name, spec in known.items():
         if name not in payload:
             continue
-        kwargs[name] = _restore(name, spec.type, payload[name])
+        kwargs[name] = _restore(target, name, payload[name])
     return target(**kwargs)
 
 
@@ -312,11 +335,19 @@ _NESTED: Dict[str, Any] = {
     "input": InputPolicy,
     "output": OutputPolicy,
     "judge": JudgeConfig,
+    "tools": ToolPolicy,
     "history": HistoryConfig,
     "budget": Budget,
     "transport": Transport,
     "schema": formats.Schema,
     "agent": "AgentConfig",
+}
+
+
+# Поля-кортежи, опознаваемые парой «класс, имя».
+_TUPLE_FIELDS = {
+    (InputPolicy, "forbidden"),
+    (ToolPolicy, "enabled"),
 }
 
 
@@ -373,16 +404,20 @@ def default_section(name: str) -> Optional[Dict[str, Any]]:
     return _to_plain(target())
 
 
-def _restore(name: str, annotation: Any, value: Any) -> Any:
-    if name == "fields":
-        return tuple(_from_plain(formats.Field, item) for item in value or ())
-    if name == "criteria":
-        return tuple(tuple(item) for item in value or ())
-    if name == "forbidden":
+def _restore(owner: type, name: str, value: Any) -> Any:
+    """Восстановить значение поля из простого вида.
+
+    Поле опознаётся парой «класс, имя», а не одним именем. По имени было
+    нельзя: ``enabled`` у истории — признак, а у инструментов — список имён,
+    и разбор по имени превращал один в другой.
+    """
+    if (owner, name) in _TUPLE_FIELDS:
         return tuple(value or ())
-    if name in _NESTED:
-        target = _NESTED[name]
-        if target == "AgentConfig":
-            target = AgentConfig
-        return _from_plain(target, value)
+    if (owner, name) == (JudgeConfig, "criteria"):
+        return tuple(tuple(item) for item in value or ())
+    if (owner, name) == (formats.Schema, "fields"):
+        return tuple(_from_plain(formats.Field, item) for item in value or ())
+    target = _NESTED.get(name)
+    if target is not None:
+        return _from_plain(AgentConfig if target == "AgentConfig" else target, value)
     return value
