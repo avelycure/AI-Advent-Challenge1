@@ -10,6 +10,7 @@ from llmagent import (
     ContextOverflow,
     GenerationParams,
     HistoryConfig,
+    InputPolicy,
     Transport,
 )
 
@@ -439,3 +440,43 @@ def test_a_truncated_answer_is_not_an_overflow():
     result = agent.ask("Вопрос")
     assert result.finish_reason == "length"
     assert agent.breakdown().fits
+
+
+# --------------------------------------------------------------------------
+# Переполнение: отправить как есть
+# --------------------------------------------------------------------------
+
+def test_send_lets_the_provider_have_the_last_word():
+    """Своя проверка молчит: показать надо именно отказ провайдера."""
+    client = ScriptedClient(["Короткий ответ."])
+    agent = agent_with(client, history=HistoryConfig(window=1500, on_overflow="send"),
+                       input=InputPolicy(max_chars=100_000))
+    for number in range(40):
+        agent.ask("Вопрос {}: расскажи подробно про структуры данных".format(number))
+    assert not agent.breakdown().fits
+    assert len(client.calls) == 40
+
+
+def test_send_does_not_forget_anything():
+    agent = agent_with(ScriptedClient(["Короткий ответ."]),
+                       history=HistoryConfig(window=1500, on_overflow="send"))
+    agent.ask("Меня зовут Иван")
+    for number in range(30):
+        agent.ask("Вопрос {}: расскажи подробно про структуры данных".format(number))
+    assert any("Иван" in message.content for message in agent.conversation.messages)
+
+
+def test_send_passes_a_single_question_wider_than_the_window():
+    agent = agent_with(ScriptedClient(["Короткий ответ."]),
+                       history=HistoryConfig(window=1500, on_overflow="send"))
+    assert agent.ask(HUGE).text == "Короткий ответ."
+
+
+def test_only_send_skips_the_guard():
+    for policy in ("stop", "trim"):
+        agent = agent_with(ScriptedClient(["Ответ."]),
+                           history=HistoryConfig(window=1500, on_overflow=policy))
+        assert not agent.sends_anyway
+    agent = agent_with(ScriptedClient(["Ответ."]),
+                       history=HistoryConfig(window=1500, on_overflow="send"))
+    assert agent.sends_anyway

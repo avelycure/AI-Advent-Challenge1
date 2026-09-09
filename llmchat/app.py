@@ -540,12 +540,20 @@ def chat_loop(console: Console, keys, session: Session,
         if forgotten:
             # Молча забыть начало разговора нельзя: следующий ответ модели
             # будет выглядеть беспамятным, и человек не поймёт, почему.
-            notice = warning_panel(
+            console.print(warning_panel(
                 "Контекст переполнился, и начало разговора забыто: {} {} больше "
                 "не уходят в модель. Отвечать она будет только по остатку.".format(
-                    forgotten, plural(forgotten, ("сообщение", "сообщения", "сообщений"))))
-            console.print(notice)
-            notice = None
+                    forgotten, plural(forgotten, ("сообщение", "сообщения", "сообщений")))))
+        elif session.agent.sends_anyway and not session.agent.breakdown().fits:
+            # Запрос заведомо не влезает, но отправляется намеренно: человек
+            # попросил показать не нашу проверку, а ответ провайдера.
+            over = session.agent.breakdown()
+            console.print(warning_panel(
+                "Запрос не помещается в окно на {} {}, но уходит как есть: "
+                "on_overflow=send. Дальше слово за провайдером — покажем, что "
+                "он ответит.".format(
+                    fmt(over.excess),
+                    plural(over.excess, ("токен", "токена", "токенов")))))
 
         render_frame(console, session)
         result, notice = request_answer(console, session)

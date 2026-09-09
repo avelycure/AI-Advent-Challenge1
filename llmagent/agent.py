@@ -199,11 +199,22 @@ class Agent:
         и тот же ответ на переполнение, а не своя выдумка у каждого.
         """
         breakdown = self.breakdown()
-        if breakdown.fits:
+        if breakdown.fits or self.sends_anyway:
             return 0
         if self._config.history.on_overflow != "trim":
             raise ContextOverflow(_overflow_reason(breakdown))
         return self._forget_oldest(breakdown)
+
+    @property
+    def sends_anyway(self) -> bool:
+        """Отправлять ли заведомо не помещающийся запрос.
+
+        Нужно ровно затем, чтобы увидеть отказ самого провайдера. Своя
+        проверка до него не допускает — и правильно делает: она называет
+        числа, а провайдер отвечает сухим кодом 400. Но пока эту ветку не
+        показать вживую, нельзя утверждать, что программа разбирает её верно.
+        """
+        return self._config.history.on_overflow == "send"
 
     def reset(self) -> None:
         """Забыть диалог. Счётчики расхода остаются: деньги уже потрачены."""
@@ -344,7 +355,7 @@ class Agent:
         # уместившейся, но этим путём ходят и переспрос, и круги инструментов,
         # и запрос без истории — а провайдер отвечает на переполнение сухим
         # кодом 400, из которого не видно ни размера, ни того, что сокращать.
-        if planned_input + reserve > self.context_limit:
+        if not self.sends_anyway and planned_input + reserve > self.context_limit:
             raise ContextOverflow(
                 "запрос не помещается в окно модели: {} токенов сообщений плюс "
                 "{} резерва под ответ — это {} при окне {}, лишних {}".format(

@@ -79,6 +79,7 @@ agent --max-cost 0.05                            # не тратить боль�
 agent --no-history                               # каждый вопрос сам по себе
 agent --set history.window=2000                  # тесное окно: увидеть переполнение
 agent --set history.on_overflow=trim             # не падать, а забывать начало
+agent --set history.on_overflow=send             # отправить как есть: слово провайдеру
 agent --set 'template=Переведи на английский: {input}'
 agent --config '{"model": "gpt-5.4-nano"}'       # конфиг строкой, без файла
 ```

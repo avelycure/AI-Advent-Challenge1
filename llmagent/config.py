@@ -159,6 +159,9 @@ class ToolPolicy:
 # промпт с одним вопросом, и любой запрос отвергался бы ещё до отправки.
 MIN_WINDOW = 256
 
+# Что делать с диалогом, который перестал помещаться в окно.
+OVERFLOW_POLICIES = ("stop", "trim", "send")
+
 
 @dataclass(frozen=True)
 class HistoryConfig:
@@ -170,13 +173,14 @@ class HistoryConfig:
     # и не упираясь в лимит бесплатного тарифа.
     window: Optional[int] = None
     # Что делать, когда диалог перестал помещаться: "stop" — отказать,
-    # "trim" — забыть начало разговора и продолжить.
+    # "trim" — забыть начало разговора и продолжить, "send" — отправить как
+    # есть и показать, что на это скажет провайдер.
     on_overflow: str = "stop"
 
     def __post_init__(self) -> None:
-        if self.on_overflow not in ("stop", "trim"):
-            raise ConfigError("history.on_overflow: допустимо stop или trim, "
-                              "а не «{}»".format(self.on_overflow))
+        if self.on_overflow not in OVERFLOW_POLICIES:
+            raise ConfigError("history.on_overflow: допустимо {}, а не «{}»".format(
+                ", ".join(OVERFLOW_POLICIES), self.on_overflow))
         if self.window is not None and self.window < MIN_WINDOW:
             raise ConfigError("history.window: окно меньше {} токенов ни на что "
                               "не годится, задано {}".format(MIN_WINDOW, self.window))
