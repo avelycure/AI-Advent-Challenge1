@@ -423,7 +423,7 @@ def test_switching_model_inside_one_provider_does_not_ask_for_the_key(fast_confi
 def test_config_changing_commands_are_saved_at_once(fast_config, tmp_path):
     """Переключить модель и выйти, не задав вопроса, — обычное дело."""
     chat("--config", str(fast_config), home=tmp_path,
-         script="Привет\n/change_model 5\n/exit\n")
+         script="Привет\n/change_model gpt-5.4\n/exit\n")
     saved = json.loads(next((tmp_path / ".llm-agent" / "sessions").glob("*.json"))
                        .read_text(encoding="utf-8"))
     assert saved["config"]["model"] == "gpt-5.4"
@@ -431,7 +431,7 @@ def test_config_changing_commands_are_saved_at_once(fast_config, tmp_path):
 
 def test_returned_session_keeps_the_switched_model(fast_config, tmp_path):
     chat("--config", str(fast_config), home=tmp_path,
-         script="Привет\n/change_model 5\n/exit\n")
+         script="Привет\n/change_model gpt-5.4\n/exit\n")
     assert "gpt-5.4 " in chat("--continue", home=tmp_path) + " "
 
 

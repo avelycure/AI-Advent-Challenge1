@@ -172,16 +172,34 @@ PROVIDERS: Dict[str, ProviderInfo] = {
         accent="magenta",
         key_hint="ключ начинается с sk-",
         key_files=["~/.deepseek-key", "~/.llm-test-key", "~/.config/llm-chat/deepseek.key"],
+        # Окна, пределы ответа и цены взяты со страницы прайса DeepSeek
+        # api-docs.deepseek.com/quick_start/pricing. Цена записана по дорогому
+        # тарифу: в часы наименьшей нагрузки она вдвое ниже, и считать по
+        # дешёвому значило бы обещать потолок трат, который не держится.
         models=[
-            # Цена намеренно не задана: в документации DeepSeek этих имён больше
-            # нет — прайс published только для deepseek-v4-flash и -v4-pro,
-            # и переносить их цену на старые псевдонимы было бы выдумкой.
-            ModelInfo("deepseek-chat", "DeepSeek Chat — универсальная модель", 64_000, 8_192,
-                      price_note="в документации этого имени больше нет, цена неизвестна"),
-            ModelInfo("deepseek-reasoner", "DeepSeek Reasoner — с цепочкой рассуждений",
-                      64_000, 8_192,
-                      price_note="в документации этого имени больше нет, цена неизвестна"),
+            ModelInfo("deepseek-v4-flash", "DeepSeek V4 Flash — быстрая и дешёвая",
+                      1_000_000, 384_000,
+                      input_price=0.44, output_price=1.32, cached_price=0.014,
+                      price_note="в часы наименьшей нагрузки вдвое дешевле; "
+                                 "зачтённый по кешу вход стоит $0.014 за 1M"),
+            ModelInfo("deepseek-v4-pro", "DeepSeek V4 Pro — для сложных задач",
+                      1_000_000, 384_000,
+                      input_price=1.32, output_price=3.96, cached_price=0.044,
+                      price_note="в часы наименьшей нагрузки вдвое дешевле; "
+                                 "зачтённый по кешу вход стоит $0.044 за 1M"),
+            # Прежнее имя. В ответе /models его больше нет, но провайдер его
+            # ещё принимает, и сохранённые сессии на него ссылаются: убрать
+            # значило бы не открыть уже записанный разговор. Цену не ставим —
+            # неизвестно, на какую из моделей оно сейчас переводится.
+            ModelInfo("deepseek-chat", "DeepSeek Chat — прежнее имя, ведёт на V4",
+                      1_000_000, 8_192,
+                      price_note="имени нет в каталоге провайдера; на какую модель "
+                                 "оно переводится, не сказано, поэтому цена не задана"),
         ],
+        notes=["В ответе /models сейчас три модели: deepseek-v4-flash, "
+               "deepseek-v4-pro и экспериментальная deepseek-v4-flash-vision-exp "
+               "с картинками на входе. Прежние deepseek-chat и deepseek-reasoner "
+               "из каталога провайдера пропали."],
     ),
     "yandex": ProviderInfo(
         key="yandex",

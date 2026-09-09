@@ -38,9 +38,15 @@ def test_free_tariff_costs_nothing_rather_than_being_unknown():
 
 
 def test_model_without_a_price_is_counted_separately():
-    deepseek = PROVIDERS["deepseek"]
+    # Модель ищется по признаку, а не по месту в каталоге: каталог правят,
+    # и тест не должен ломаться оттого, что у провайдера прибавилось моделей.
+    unpriced = [(provider, model) for provider in PROVIDERS.values()
+                for model in provider.models
+                if not model.priced and not provider.free]
+    assert unpriced, "в каталоге не осталось модели без цены — проверять нечего"
+    provider, model = unpriced[0]
     meter = UsageMeter()
-    assert meter.record(completion(), deepseek, deepseek.models[0]) is None
+    assert meter.record(completion(), provider, model) is None
     assert meter.unpriced_requests == 1
     assert meter.costs == {}
 
