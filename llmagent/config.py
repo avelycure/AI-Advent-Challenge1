@@ -155,11 +155,31 @@ class ToolPolicy:
         return bool(self.enabled)
 
 
+# Меньше этого окно сужать бессмысленно: в него не влезет даже системный
+# промпт с одним вопросом, и любой запрос отвергался бы ещё до отправки.
+MIN_WINDOW = 256
+
+
 @dataclass(frozen=True)
 class HistoryConfig:
     enabled: bool = True
     # Из подряд идущих ответов в запрос уходит только последний.
     keep_last_answer: bool = True
+    # Окно контекста меньше того, что заявила модель. None — окно модели как есть.
+    # Нужно, чтобы переполнение можно было увидеть, не набивая сто тысяч токенов
+    # и не упираясь в лимит бесплатного тарифа.
+    window: Optional[int] = None
+    # Что делать, когда диалог перестал помещаться: "stop" — отказать,
+    # "trim" — забыть начало разговора и продолжить.
+    on_overflow: str = "stop"
+
+    def __post_init__(self) -> None:
+        if self.on_overflow not in ("stop", "trim"):
+            raise ConfigError("history.on_overflow: допустимо stop или trim, "
+                              "а не «{}»".format(self.on_overflow))
+        if self.window is not None and self.window < MIN_WINDOW:
+            raise ConfigError("history.window: окно меньше {} токенов ни на что "
+                              "не годится, задано {}".format(MIN_WINDOW, self.window))
 
 
 @dataclass(frozen=True)
@@ -200,6 +220,18 @@ class AgentConfig:
     history: HistoryConfig = field(default_factory=HistoryConfig)
     budget: Budget = field(default_factory=Budget)
     transport: Transport = field(default_factory=Transport)
+
+    def __post_init__(self) -> None:
+        # Оба поля по отдельности осмысленны, а вместе — нет: заданный ответ
+        # длиннее всего окна не оставляет места ни вопросу, ни истории, и
+        # каждый запрос отвергался бы ещё до отправки. Сказать это при запуске
+        # честнее, чем на первом же вопросе.
+        window, answer = self.history.window, self.generation.max_tokens
+        if window is not None and answer is not None and answer >= window:
+            raise ConfigError(
+                "generation.max_tokens={} не помещается в history.window={}: "
+                "под вопрос не остаётся места. Уменьшите ответ или расширьте "
+                "окно".format(answer, window))
 
     # --- разрешение имён в объекты каталога ----------------------------
     def resolve(self) -> Tuple[ProviderInfo, ModelInfo]:

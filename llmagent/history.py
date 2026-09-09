@@ -11,6 +11,11 @@ from typing import Any, Dict, List, Optional
 from .transport import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
 
 
+# Насколько далеко поправке позволено уводить оценку от локального счёта.
+MIN_SCALE = 0.5
+MAX_SCALE = 2.0
+
+
 @dataclass
 class Message:
     role: str  # "user" | "assistant"
@@ -38,9 +43,15 @@ class Conversation:
 
     keep_last_answer: bool = True
     messages: List[Message] = field(default_factory=list)
-    # Точный размер диалога по данным API и число сообщений, которое он покрывает.
+    # Точный размер диалога по данным API — на момент последнего ответа.
     exact_context: int = 0
-    exact_upto: int = 0
+    # Своя оценка того же куска переписки. Хранится ради сверки: без неё нельзя
+    # сказать, насколько локальный токенизатор расходится с чужой моделью.
+    exact_estimate: int = 0
+    # Поправка к локальной оценке, выведенная из этой сверки. Отдельным полем,
+    # а не свойством: сверка относится к куску переписки, который обрезка может
+    # выбросить, а поправка описывает токенизатор модели и переживает обрезку.
+    scale: float = 1.0
 
     def __len__(self) -> int:
         return len(self.messages)
@@ -70,19 +81,66 @@ class Conversation:
         if self.messages and self.messages[-1].role == "user":
             self.messages.pop()
 
+    def drop_oldest_exchange(self) -> int:
+        """Забыть самый старый обмен «вопрос — ответ». Возвращает число сообщений.
+
+        Ноль означает, что забывать больше нечего: в переписке не осталось ни
+        одного отвеченного вопроса, а неотвеченный — то, ради чего идёт запрос.
+        """
+        first_answer = next((index for index, message in enumerate(self.messages)
+                             if message.role == "assistant"), -1)
+        if first_answer < 0:
+            return 0
+        removed = first_answer + 1
+        del self.messages[:removed]
+        # Точный размер измерен для прежней, более длинной переписки: оставить
+        # его значило бы считать по нему обрезанный диалог.
+        self.forget_exact()
+        return removed
+
     def reset(self) -> None:
         self.messages.clear()
-        self.exact_context = 0
-        self.exact_upto = 0
+        self.forget_model()
+
+    def forget_model(self) -> None:
+        """Забыть всё, что измерено прежней моделью, — вместе с поправкой.
+
+        После смены модели чужой токенизатор больше ничего не описывает: и
+        точный размер, и выведенная из него поправка относятся к прежней.
+        """
+        self.forget_exact()
+        self.scale = 1.0
 
     def forget_exact(self) -> None:
-        """Забыть точный размер: после смены модели он измерен чужим токенизатором."""
-        self.exact_context = 0
-        self.exact_upto = 0
+        """Забыть точный размер: описанный им кусок переписки больше не тот.
 
-    def note_exchange(self, prompt_tokens: int, completion_tokens: int) -> None:
+        Поправка при этом остаётся. Она про токенизатор модели, а не про эти
+        конкретные сообщения, и терять её на каждой обрезке значило бы после
+        каждой заново промахиваться на треть.
+        """
+        self.exact_context = 0
+        self.exact_estimate = 0
+
+    def note_exchange(self, prompt_tokens: int, completion_tokens: int,
+                      estimate: int = 0) -> None:
+        """Запомнить, во что провайдер оценил переписку, и поправить себя.
+
+        Локально считает токенизатор ChatGPT, а отвечает Qwen, GLM или
+        YandexGPT со своим: на русском тексте расхождение доходит до трети.
+        Провайдер называет точное число с каждым ответом — поправка выводится
+        из него и делает следующую оценку заметно ближе к правде.
+
+        Границы поправки намеренные. Одно измерение бывает нетипичным —
+        короткий первый обмен, ответ из одного слова, — и без них случайная
+        цифра перекосила бы весь дальнейший счёт.
+        """
         self.exact_context = prompt_tokens + completion_tokens
-        self.exact_upto = len(self.messages)
+        self.exact_estimate = estimate
+        # Молчащий провайдер существует: он не вернул usage, и его ноль — не
+        # измерение. Вывести из него поправку значило бы вдвое занизить счёт
+        # на пустом месте.
+        if estimate and self.exact_context:
+            self.scale = min(MAX_SCALE, max(MIN_SCALE, self.exact_context / estimate))
 
     # --- чтение ---------------------------------------------------------
     def last_user_index(self) -> int:
@@ -105,12 +163,11 @@ class Conversation:
 
     def context_used(self, system_prompt: str) -> int:
         """Размер диалога: точные данные API плюс оценка неотправленного хвоста."""
-        if self.exact_upto == 0:
-            return count_message_tokens(self.api_messages(system_prompt))
-        pending = self.messages[self.exact_upto:]
-        return self.exact_context + sum(
-            count_text_tokens(m.content) + MESSAGE_OVERHEAD for m in pending
-        )
+        return self.weigh(self.api_messages(system_prompt))
+
+    def weigh(self, messages: List[Dict[str, str]]) -> int:
+        """Размер готовых сообщений с поправкой на токенизатор модели."""
+        return round(count_message_tokens(messages) * self.scale)
 
     @property
     def exchanges(self) -> int:
@@ -121,7 +178,8 @@ class Conversation:
         return {
             "keep_last_answer": self.keep_last_answer,
             "exact_context": self.exact_context,
-            "exact_upto": self.exact_upto,
+            "exact_estimate": self.exact_estimate,
+            "scale": self.scale,
             "messages": [asdict(message) for message in self.messages],
         }
 
@@ -135,7 +193,8 @@ class Conversation:
         known = {f.name for f in fields(Message)}
         conversation = cls(keep_last_answer=bool(payload.get("keep_last_answer", True)))
         conversation.exact_context = int(payload.get("exact_context", 0) or 0)
-        conversation.exact_upto = int(payload.get("exact_upto", 0) or 0)
+        conversation.exact_estimate = int(payload.get("exact_estimate", 0) or 0)
+        conversation.scale = float(payload.get("scale", 1.0) or 1.0)
         for item in payload.get("messages", []):
             conversation.messages.append(
                 Message(**{k: v for k, v in item.items() if k in known}))

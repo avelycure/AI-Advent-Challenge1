@@ -10,7 +10,7 @@ from __future__ import annotations
 from .transport import LLMError
 
 __all__ = ["AgentError", "ConfigError", "MissingCredentials", "InputRejected",
-           "OutputRejected", "BudgetExceeded", "LLMError"]
+           "OutputRejected", "BudgetExceeded", "ContextOverflow", "LLMError"]
 
 
 class AgentError(Exception):
@@ -35,3 +35,11 @@ class OutputRejected(AgentError):
 
 class BudgetExceeded(AgentError):
     """Лимит токенов или денег исчерпан; запрос не отправлен."""
+
+
+class ContextOverflow(AgentError):
+    """Диалог не помещается в окно модели; запрос не отправлен.
+
+    Отдельно от ``BudgetExceeded``: там кончились деньги и помогает новый
+    лимит, здесь кончилось место и помогает только более короткий разговор.
+    """

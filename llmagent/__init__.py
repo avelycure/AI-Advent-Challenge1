@@ -27,12 +27,14 @@ from .errors import (
     AgentError,
     BudgetExceeded,
     ConfigError,
+    ContextOverflow,
     InputRejected,
     LLMError,
     MissingCredentials,
     OutputRejected,
 )
 from .formats import FORMATS, FREE_FORMAT, STOP_MARKER, Check, Field, Schema, Validation
+from .breakdown import RequestBreakdown, Step
 from .history import Conversation, Message
 from .params import GenerationParams
 from .catalog import find_model
@@ -52,11 +54,11 @@ __all__ = [
     "ToolPolicy", "Toolbox", "ToolSpec", "ToolOutcome", "spawn_agent_spec", "SPAWN_AGENT",
     "GenerationParams", "Schema", "Field", "Check", "Validation",
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",
-    "Conversation", "Message", "UsageMeter",
+    "Conversation", "Message", "UsageMeter", "RequestBreakdown", "Step",
     "ClientRegistry", "Credentials", "SHARED", "resolve_credentials",
     "SessionStore", "SessionRecord", "SessionNotFound", "restore_agent",
     "find_model", "append_system_prompt",
     "spawn", "spawn_sync", "build_agents", "matrix", "summarize",
     "AgentError", "ConfigError", "MissingCredentials", "InputRejected",
-    "OutputRejected", "BudgetExceeded", "LLMError",
+    "OutputRejected", "BudgetExceeded", "ContextOverflow", "LLMError",
 ]

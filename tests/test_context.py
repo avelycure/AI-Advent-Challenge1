@@ -116,7 +116,8 @@ def test_found_by_number_name_and_part_of_the_identifier(store):
     assert store.find("1").session_id == made[-1], (made, listing)
     assert store.find("Алгоритмы").session_id == made[0], (made, listing)
     # Префикс берём подлиннее: у четырёх шестнадцатеричных знаков есть шанс
-    # совпасть у двух сессий, и тест стал бы неустойчивым.
+    # совпасть у двух сессий, и тест стал бы неустойчивым. Начало из одних
+    # цифр — не помеха: такому идентификатору отдельная проверка ниже.
     assert store.find(made[1][:6]).session_id == made[1]
 
 
@@ -329,3 +330,18 @@ def test_concurrent_saves_do_not_share_a_temporary_file(store):
 
 def _temporary_name(store, session_id: str) -> str:
     return store.path_for(session_id).with_suffix(".{}.tmp".format(os.getpid())).name
+
+
+def test_all_digit_prefix_still_opens_the_session(store):
+    """Начало идентификатора из одних цифр не должно читаться только как номер."""
+    agent = talked("Что такое хвостовая рекурсия?")
+    agent.session_id = "931346ab"
+    store.save(agent, title="Рекурсия")
+    assert store.find("931346").session_id == "931346ab"
+
+
+def test_unknown_number_still_says_it_is_unknown(store):
+    three_sessions(store)
+    with pytest.raises(SessionNotFound) as info:
+        store.find("77")
+    assert "нет сессии под номером 77" in str(info.value)

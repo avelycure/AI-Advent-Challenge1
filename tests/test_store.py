@@ -237,9 +237,9 @@ def test_returning_with_another_model_forgets_the_exact_size(store):
     agent = talked()
     store.save(agent)
     record = store.load(agent.session_id)
-    assert record.conversation["exact_upto"] > 0
+    assert record.conversation["exact_context"] > 0
 
     same = restore_agent(record, record.to_config())
     other = restore_agent(record, record.to_config().with_changes(model="gpt-5.4"))
-    assert same.conversation.exact_upto > 0
-    assert other.conversation.exact_upto == 0
+    assert same.conversation.exact_context > 0
+    assert other.conversation.exact_context == 0

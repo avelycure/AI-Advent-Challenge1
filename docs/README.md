@@ -19,6 +19,7 @@
 | [feature-model-switch.md](feature-model-switch.md) | смена модели и провайдера во время диалога, повтор вопроса |
 | [feature-context-persistence.md](feature-context-persistence.md) | сохранение контекста: имена сессий, поиск по переписке, возврат в разговор |
 | [feature-agent.md](feature-agent.md) | агент как отдельная сущность: конфиг, политики, судья, учёт токенов, спавн сотни агентов |
+| [feature-tokens.md](feature-tokens.md) | подсчёт токенов: раскладка запроса, поправка к оценке, рост цены и поведение при переполнении |
 
 Все эти работы собраны в одной ветке `feature/llm-params`: сначала они велись
 по отдельным веткам, но это раздробило связанные правки одних и тех же файлов
@@ -34,3 +35,7 @@
 [day6-agent-plan.md](day6-agent-plan.md) — план, его ревью и условия приёмки,
 [plan-config-overrides.md](plan-config-overrides.md) — план по передаче параметров
 из командной строки, сверенный с тем, как это устроено в Claude Code.
+
+Планы по дням лежат рядом с описаниями веток:
+[day7-context-plan.md](day7-context-plan.md) — сохранение контекста,
+[day8-tokens-plan.md](day8-tokens-plan.md) — работа с токенами.

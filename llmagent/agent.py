@@ -15,8 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from . import judge as judging
 from . import policies
+from .breakdown import RequestBreakdown, Step, growth, request_breakdown
 from .config import DEFAULT_CONFIG, AgentConfig
-from .errors import LLMError, OutputRejected
+from .errors import ContextOverflow, LLMError, OutputRejected
 from .history import Conversation
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
@@ -85,7 +86,7 @@ class Agent:
         if provider_changed:
             # Точный размер контекста измерен токенизатором прежней модели
             # и после смены неверен: история снова оценивается локально.
-            self.conversation.forget_exact()
+            self.conversation.forget_model()
         if provider_changed or credentials_changed:
             self._client = None
             self._credentials = None
@@ -121,13 +122,28 @@ class Agent:
     # --- окно контекста --------------------------------------------------
     @property
     def context_limit(self) -> int:
-        return self._config.model_info.context_window
+        """Окно, в которое агент себя загоняет: заданное вручную или модельное.
+
+        Суженное окно не выдумка ради удобства: у провайдера бывает тарифный
+        предел на запрос ниже окна модели, и упереться в него на середине
+        ответа хуже, чем знать про потолок заранее.
+        """
+        declared = self._config.model_info.context_window
+        wanted = self._config.history.window
+        return min(declared, wanted) if wanted else declared
 
     @property
     def output_reserve(self) -> int:
-        """Сколько токенов оставлено под ответ с учётом заданных параметров."""
-        return self._config.generation.effective_max_tokens(
-            self._config.model_info.output_reserve)
+        """Сколько токенов оставлено под ответ с учётом заданных параметров.
+
+        Заданный человеком ``max_tokens`` берётся как есть — это его слово.
+        Резерв по умолчанию дополнительно упирается в четверть окна: у модели
+        с окном на четыре тысячи токенов ответ на четыре тысячи не бывает, и
+        без этого предела суженное окно не оставляло бы места вопросу вовсе.
+        """
+        model_reserve = min(self._config.model_info.output_reserve,
+                            max(1, self.context_limit // 4))
+        return self._config.generation.effective_max_tokens(model_reserve)
 
     @property
     def input_budget(self) -> int:
@@ -137,6 +153,15 @@ class Agent:
         считается по действующему значению, а не по резерву модели.
         """
         return max(1, self.context_limit - self.output_reserve)
+
+    def breakdown(self) -> RequestBreakdown:
+        """Из чего сложится ближайший запрос и влезет ли он в окно."""
+        return request_breakdown(self.conversation, self._system_prompt(),
+                                 self.output_reserve, self.context_limit)
+
+    def growth(self) -> List[Step]:
+        """Во что обошёлся каждый обмен и сколько набежало с начала диалога."""
+        return growth(self.conversation)
 
     def context_used(self) -> int:
         return self.conversation.context_used(self._config.system_prompt)
@@ -165,6 +190,20 @@ class Agent:
 
     def is_full(self) -> bool:
         return self.free_tokens() <= 0
+
+    def fit_context(self) -> int:
+        """Уместить диалог в окно. Возвращает число забытых сообщений.
+
+        Проверка живёт в агенте, а не в интерфейсе: через агента ходят и
+        под-агент, и ``--json``, и скрипты сравнения, и всем им нужен один
+        и тот же ответ на переполнение, а не своя выдумка у каждого.
+        """
+        breakdown = self.breakdown()
+        if breakdown.fits:
+            return 0
+        if self._config.history.on_overflow != "trim":
+            raise ContextOverflow(_overflow_reason(breakdown))
+        return self._forget_oldest(breakdown)
 
     def reset(self) -> None:
         """Забыть диалог. Счётчики расхода остаются: деньги уже потрачены."""
@@ -220,6 +259,9 @@ class Agent:
         Вопрос из истории при неудаче не убирается: этот путь для вызывающего,
         который сам положил его туда и сам решает, что делать дальше.
         """
+        # Умещаем диалог до сборки сообщений: обрезать историю после того, как
+        # запрос собран, — значит отправить в модель прежний, длинный.
+        self.fit_context()
         return self._answer(self.conversation.api_messages(self._system_prompt()))
 
     def retry_last(self) -> Optional[AgentResult]:
@@ -250,6 +292,26 @@ class Agent:
                           response_format=response_format)
 
     # --- внутреннее -------------------------------------------------------
+    def _forget_oldest(self, breakdown: RequestBreakdown) -> int:
+        """Выбрасывать самые старые обмены, пока запрос не влезет в окно.
+
+        Забывается всегда пара «вопрос — ответ» целиком. Оставить вопрос без
+        ответа значило бы показать модели её собственную реплику как чужую,
+        а ответ без вопроса — как ответ неизвестно на что.
+
+        Системный промпт и неотвеченный вопрос не трогаются никогда: первый
+        задаёт правила разговора, второй и есть то, ради чего запрос идёт.
+        Если без них всё равно не влезает, обрезать больше нечего — отказ.
+        """
+        forgotten = 0
+        while not breakdown.fits:
+            pair = self.conversation.drop_oldest_exchange()
+            if not pair:
+                raise ContextOverflow(_overflow_reason(breakdown, trimmed=forgotten))
+            forgotten += pair
+            breakdown = self.breakdown()
+        return forgotten
+
     def _system_prompt(self) -> str:
         return policies.output_system_prompt(self._config.output,
                                              self._config.system_prompt)
@@ -277,7 +339,17 @@ class Agent:
         # Незнакомое поле передаём только когда оно нужно: клиент без
         # поддержки инструментов должен работать как прежде.
         extra = {"tools": tools} if tools else {}
-        planned_input = count_message_tokens(messages)
+        planned_input = self.conversation.weigh(messages)
+        # Последняя застава перед отправкой. Историю сюда приводят уже
+        # уместившейся, но этим путём ходят и переспрос, и круги инструментов,
+        # и запрос без истории — а провайдер отвечает на переполнение сухим
+        # кодом 400, из которого не видно ни размера, ни того, что сокращать.
+        if planned_input + reserve > self.context_limit:
+            raise ContextOverflow(
+                "запрос не помещается в окно модели: {} токенов сообщений плюс "
+                "{} резерва под ответ — это {} при окне {}, лишних {}".format(
+                    planned_input, reserve, planned_input + reserve, self.context_limit,
+                    planned_input + reserve - self.context_limit))
         self.usage.check(
             self._config.budget,
             upcoming_tokens=planned_input + reserve,
@@ -454,8 +526,10 @@ class Agent:
                 # втором вопросе и выбросить его.
                 self.conversation.forget_exact()
             else:
-                self.conversation.note_exchange(completion.prompt_tokens,
-                                                completion.completion_tokens)
+                self.conversation.note_exchange(
+                    completion.prompt_tokens, completion.completion_tokens,
+                    estimate=count_message_tokens(
+                        self.conversation.api_messages(self._system_prompt())))
 
         if self._config.judge is not None:
             self._apply_judge(result, question)
@@ -570,3 +644,13 @@ def _add(current: Optional[float], addition: Optional[float]) -> Optional[float]
     if addition is None:
         return current
     return addition if current is None else current + addition
+
+
+def _overflow_reason(breakdown: RequestBreakdown, trimmed: int = 0) -> str:
+    """Отказ с числами: без них человеку нечего сокращать."""
+    tail = ("; забыто {} сообщений, и дальше сокращать нечего".format(trimmed)
+            if trimmed else "")
+    return ("диалог не помещается в окно модели: {} токенов истории и вопроса "
+            "плюс {} резерва под ответ — это {} при окне {}, лишних {}{}".format(
+                breakdown.input_tokens, breakdown.reserve, breakdown.planned,
+                breakdown.window, breakdown.excess, tail))

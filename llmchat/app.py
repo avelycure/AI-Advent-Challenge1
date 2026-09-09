@@ -21,6 +21,7 @@ from llmagent import (
     AgentConfig,
     AgentError,
     ConfigError,
+    ContextOverflow,
     InputRejected,
     LLMError,
     MissingCredentials,
@@ -54,6 +55,7 @@ from .ui import (
     render_frame,
     render_history,
     show_banner,
+    tokens_panel,
     warning_panel,
 )
 
@@ -461,6 +463,9 @@ def chat_loop(console: Console, keys, session: Session,
             if command == "/stats":
                 notice = stats_panel(session)
                 continue
+            if command in ("/tokens", "/token"):
+                notice = tokens_panel(session)
+                continue
             if command == "/config":
                 notice = config_panel(session)
                 continue
@@ -523,13 +528,24 @@ def chat_loop(console: Console, keys, session: Session,
             continue
 
         session.add_user(prepared)
-        if session.is_full():
+        try:
+            forgotten = session.agent.fit_context()
+        except ContextOverflow as exc:
             session.drop_last_user()
             notice = error_panel(
-                "Контекст заполнен: сообщение не помещается в окно модели. "
-                "Начните новый диалог командой /new."
-            )
+                "{}.\n[dim]Начните новый диалог командой /new, сократите вопрос "
+                "или разрешите забывать начало разговора: "
+                "--set history.on_overflow=trim.[/]".format(exc))
             continue
+        if forgotten:
+            # Молча забыть начало разговора нельзя: следующий ответ модели
+            # будет выглядеть беспамятным, и человек не поймёт, почему.
+            notice = warning_panel(
+                "Контекст переполнился, и начало разговора забыто: {} {} больше "
+                "не уходят в модель. Отвечать она будет только по остатку.".format(
+                    forgotten, plural(forgotten, ("сообщение", "сообщения", "сообщений"))))
+            console.print(notice)
+            notice = None
 
         render_frame(console, session)
         result, notice = request_answer(console, session)
@@ -671,7 +687,10 @@ def answer_notice(session: Session, result) -> Optional[RenderableType]:
         return warning_panel(
             "Ответ обрезан: упёрся в max_tokens = {}. Модель не договорила. "
             "Увеличьте лимит командой /change_llm_params max_tokens=… "
-            "или сбросьте параметры.".format(fmt(session.output_reserve)))
+            "или сбросьте параметры.\n"
+            "[dim]Контекст тут ни при чём: место в окне ещё есть ({} токенов), "
+            "кончился именно отведённый ответу предел.[/]".format(
+                fmt(session.output_reserve), fmt(session.free_tokens())))
     return None
 
 

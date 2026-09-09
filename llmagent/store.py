@@ -122,6 +122,11 @@ class SessionRecord:
         return AgentConfig.from_dict(self.config)
 
 
+# С этой длины запись из одних цифр читается как начало идентификатора,
+# а не как номер в списке.
+ID_PREFIX_DIGITS = 4
+
+
 class SessionStore:
     """Каталог сессий. Всё общение с диском — только здесь."""
 
@@ -244,13 +249,20 @@ class SessionStore:
         if len(exact) == 1:
             return exact[0]
 
-        if asked.isdigit():
+        # Число и начало идентификатора не отличить по виду, поэтому их
+        # разводит длина. Номер в списке не длиннее трёх знаков: сам список
+        # ограничен двумя сотнями. Куском идентификатора короче четырёх знаков
+        # никто не пользуется — он подходит слишком многим сессиям. Без этого
+        # деления идентификатор, начинающийся с цифр, не открывался по своему
+        # же началу, а короткий номер иногда попадал в чужую сессию.
+        if asked.isdigit() and len(asked) < ID_PREFIX_DIGITS:
             number = int(asked)
             for record in recent:
                 if record.number == number:
                     return record
             raise SessionNotFound("нет сессии под номером {}: в списке их {}".format(
                 number, len(recent)))
+
         lowered = asked.lower()
         found = [r for r in recent if r.session_id.startswith(lowered)
                  or lowered in (r.title or "").lower()

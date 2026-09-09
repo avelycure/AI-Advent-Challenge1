@@ -26,6 +26,7 @@ from llmagent.transport import (
     ProviderInfo,
     find_sources,
     mask,
+    tokenizer_name,
 )
 
 from .session import Session
@@ -686,10 +687,137 @@ def warning_panel(text: str) -> RenderableType:
     return info_panel("[yellow]{}[/]".format(text), title="⚠ Внимание", style="yellow")
 
 
+# --------------------------------------------------------------------------
+# Раскладка по токенам
+# --------------------------------------------------------------------------
+
+def tokens_panel(session: Session) -> RenderableType:
+    """Ответ на три вопроса: из чего запрос, во что верить, как растёт цена."""
+    breakdown = session.breakdown()
+    blocks = [_request_table(breakdown), _accuracy_line(breakdown)]
+    steps = session.growth()
+    if steps:
+        blocks += [Text(), _growth_table(steps)]
+    blocks += [_fit_line(breakdown, session)]
+    return Panel(Group(*blocks), title="Токены", title_align="left",
+                 border_style="magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def _request_table(breakdown) -> Table:
+    """Из чего сложится ближайший запрос."""
+    table = _help_table(title="Уйдёт в модель при следующем вопросе")
+    # Узкая таблица на всю ширину рассыпалась бы: между названием части и её
+    # весом оказалось бы полэкрана пустоты.
+    table.expand = False
+    table.add_column("Часть", style="dim", no_wrap=True, min_width=22)
+    table.add_column("Токенов", style="bold", justify="right", no_wrap=True)
+    table.add_column("Доля", justify="right", no_wrap=True)
+    for part in breakdown.parts():
+        table.add_row(part.title, fmt(part.tokens), "{:.0%}".format(part.share))
+    if breakdown.input_tokens != breakdown.estimated_input:
+        # Поправка применяется к сумме, а не к каждой части: иначе столбик
+        # перестал бы сходиться с итогом из-за округления каждой строки.
+        table.add_row(Text("Итого по частям", style="bold"),
+                      Text(fmt(breakdown.estimated_input), style="bold"), "")
+        table.add_row("Поправка на токенизатор", "×{:.2f}".format(breakdown.scale), "")
+    table.add_row(Text("Итого вход", style="bold"),
+                  Text(fmt(breakdown.input_tokens), style="bold magenta"), "")
+    table.add_row("Резерв под ответ", fmt(breakdown.reserve), "")
+    table.add_row(Text("Займёт от окна", style="bold"),
+                  Text(fmt(breakdown.planned), style="bold magenta"),
+                  "{:.0%}".format(min(1.0, breakdown.planned / breakdown.window)))
+    return table
+
+
+def _accuracy_line(breakdown) -> Text:
+    """Чем считали и насколько промахнулись — иначе цифрам нельзя верить."""
+    line = Text()
+    line.append("Оценка неотправленного: ", style="dim")
+    line.append(tokenizer_name())
+    drift = breakdown.drift
+    if drift is None:
+        line.append("  ·  сверить не с чем: ответов ещё не было", style="dim")
+        return line
+    line.append("  ·  провайдер насчитал ", style="dim")
+    line.append(fmt(breakdown.measured))
+    line.append(" там, где мы оценили ", style="dim")
+    line.append(fmt(breakdown.measured_estimate))
+    off = (drift - 1) * 100
+    line.append("  ·  ошибка ", style="dim")
+    # «-0%» читается как ошибка вывода, а не как её отсутствие.
+    line.append("меньше процента" if abs(off) < 0.5 else "{:+.0f}%".format(off),
+                style="green" if abs(off) < 10 else "yellow")
+    if abs(breakdown.scale - 1.0) > 0.005:
+        line.append(", и она уже учтена: оценка умножается на {:.2f}".format(
+            breakdown.scale), style="dim")
+    return line
+
+
+def _growth_table(steps) -> Table:
+    """Как дорожает разговор: тот же вопрос на десятом обмене стоит дороже."""
+    table = _help_table(title="Рост по обменам")
+    table.add_column("№", style="dim", justify="right", no_wrap=True)
+    table.add_column("Вопрос")
+    table.add_column("Вход", justify="right", no_wrap=True)
+    table.add_column("Выход", justify="right", no_wrap=True)
+    table.add_column("Всего", style="bold", justify="right", no_wrap=True)
+    table.add_column("Цена шага", justify="right", no_wrap=True)
+    table.add_column("Итогом", style="bold", justify="right", no_wrap=True)
+    for step in _shortened(steps):
+        if step is None:
+            table.add_row("…", Text("пропущено", style="dim"), "…", "…", "…", "…", "…")
+            continue
+        table.add_row(
+            str(step.number), Text(_clip(step.question, 34), style="dim"),
+            fmt(step.prompt_tokens), fmt(step.completion_tokens),
+            fmt(step.total_tokens),
+            format_cost(step.cost, step.currency),
+            format_cost(step.total_cost, step.currency))
+    return table
+
+
+def _fit_line(breakdown, session: Session) -> Text:
+    """Влезет ли следующий вопрос и что случится, если нет."""
+    line = Text()
+    if not breakdown.fits:
+        line.append("Не помещается: ", style="bold red")
+        line.append("лишних {} токенов при окне {}. ".format(
+            fmt(breakdown.excess), fmt(breakdown.window)))
+        line.append("Запрос не уйдёт в модель — нужен /new.", style="dim")
+        return line
+    line.append("Свободно ", style="bold")
+    line.append(fmt(breakdown.free), style="green")
+    line.append(" из {} токенов окна".format(fmt(breakdown.window)), style="dim")
+    if session.exchanges:
+        line.append("  ·  средний обмен {}  ·  хватит ещё на ≈{} {}".format(
+            fmt(session.avg_exchange_tokens()), session.remaining_exchanges(),
+            plural(session.remaining_exchanges(),
+                   ("сообщение", "сообщения", "сообщений"))), style="dim")
+    return line
+
+
+# Длинный диалог целиком не нужен: важны первые обмены, последние и то, что
+# между ними расстояние. Середина сворачивается в одну строку.
+GROWTH_HEAD = 3
+GROWTH_TAIL = 5
+
+
+def _shortened(steps):
+    if len(steps) <= GROWTH_HEAD + GROWTH_TAIL + 1:
+        return list(steps)
+    return list(steps[:GROWTH_HEAD]) + [None] + list(steps[-GROWTH_TAIL:])
+
+
+def _clip(text: str, width: int) -> str:
+    line = " ".join(text.split())
+    return line if len(line) <= width else line[:width - 1] + "…"
+
+
 COMMANDS: List[tuple] = [
     ("/help", "эта справка"),
     ("/history", "показать всю переписку целиком"),
     ("/stats", "подробная статистика по токенам"),
+    ("/tokens", "из чего сложится следующий запрос и как росла цена диалога"),
     ("/rename", "переименовать сессию — по имени её потом видно в --sessions"),
     ("/config", "конфиг агента целиком — его можно сохранить и запустить с --config"),
     ("/agent", "вызвать под-агента с нужным конфигом; без аргументов — список конфигов"),

@@ -138,6 +138,12 @@ class Session:
     def is_full(self) -> bool:
         return self.agent.is_full()
 
+    def breakdown(self):
+        return self.agent.breakdown()
+
+    def growth(self):
+        return self.agent.growth()
+
     # --- расход ----------------------------------------------------------
     @property
     def requests(self) -> int:

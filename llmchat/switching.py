@@ -121,6 +121,9 @@ def switch_notice(session: Session, was: str, was_window: int) -> RenderableType
     blocks: List[RenderableType] = [table]
     if session.is_full():
         blocks.append(Text.from_markup(
+            "\n[yellow]История не помещается в окно новой модели: начало разговора "
+            "будет забыто, и отвечать она станет только по остатку.[/]"
+            if session.agent.config.history.on_overflow == "trim" else
             "\n[red]История не помещается в окно новой модели: следующий вопрос не "
             "примется. Нужна модель с окном побольше или /new.[/]"))
     elif session.messages:
