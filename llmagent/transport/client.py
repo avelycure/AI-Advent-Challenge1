@@ -161,8 +161,12 @@ def describe_error(exc: Exception) -> str:
     # с этим кодом, и, стоя ниже, объяснение не срабатывало никогда — человек
     # вместо совета получал сырой JSON провайдера.
     if _about_context_length(lowered):
-        return ("Контекст переполнен: диалог не помещается в окно модели. "
-                "Начните новый диалог командой /new или задайте вопрос короче.")
+        # Слова провайдера идут следом за советом, а не вместо него: только он
+        # знает точный размер запроса по своему токенизатору, и эти числа
+        # человеку нужнее нашей оценки — по ним видно, насколько сокращать.
+        return _with_provider_words(
+            "Контекст переполнен: диалог не помещается в окно модели. "
+            "Начните новый диалог командой /new или задайте вопрос короче.", text)
     if name == "BadRequestError" or "400" in text:
         return "Провайдер отклонил запрос (400): {}".format(_compact(text))
     return "{}: {}".format(name, _compact(text) or "неизвестная ошибка")
@@ -183,6 +187,26 @@ CONTEXT_LENGTH_PHRASES = (
 
 def _about_context_length(lowered: str) -> bool:
     return any(phrase in lowered for phrase in CONTEXT_LENGTH_PHRASES)
+
+
+def _with_provider_words(advice: str, text: str) -> str:
+    words = _provider_message(text)
+    return "{}\nПровайдер: {}".format(advice, words) if words else advice
+
+
+# Провайдеры заворачивают человеческое объяснение в поле message своего тела
+# ответа, а SDK показывает это тело как есть: «Error code: 400 - {'error':
+# {'message': "…"}}». Читать такое человеку незачем — нужна только строка.
+PROVIDER_MESSAGE = re.compile(r"""["']message["']\s*:\s*(["'])(.+?)\1""", re.DOTALL)
+
+
+def _provider_message(text: str) -> str:
+    """Вынуть объяснение провайдера из тела ответа. Пусто — вынимать нечего."""
+    found = PROVIDER_MESSAGE.search(text)
+    if found is None:
+        return ""
+    words = found.group(2).replace("\\n", " ").replace('\\"', '"').replace("\\'", "'")
+    return _compact(words, limit=300)
 
 
 # Сколько раз запрос можно переписать под отказ провайдера, прежде чем сдаться.

@@ -11,6 +11,7 @@ from typing import List, Optional
 from rich import box
 from rich.align import Align
 from rich.console import Console, Group, RenderableType
+from rich.markup import escape
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -679,8 +680,15 @@ def info_panel(text: str, title: str = "Информация", style: str = "bri
                  border_style=style, box=box.ROUNDED, padding=(0, 1))
 
 
-def error_panel(text: str) -> RenderableType:
-    return info_panel("[red]{}[/]".format(text), title="⚠ Ошибка", style="red")
+def error_panel(text: str, markup: bool = False) -> RenderableType:
+    """Панель ошибки. По умолчанию текст показывается буквально.
+
+    Буквально — потому что сюда попадают слова провайдера, а в них бывают
+    квадратные скобки. Без экранирования rich принял бы их за разметку и
+    съел кусок сообщения — ровно там, где человеку нужны точные цифры.
+    """
+    return info_panel("[red]{}[/]".format(text if markup else escape(text)),
+                      title="⚠ Ошибка", style="red")
 
 
 def warning_panel(text: str) -> RenderableType:

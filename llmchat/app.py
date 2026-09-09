@@ -9,6 +9,7 @@ import time
 from typing import List, Optional
 
 from rich.console import Console, Group, RenderableType
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -399,7 +400,7 @@ def handle_params_command(session: Session, argument: str) -> RenderableType:
         return params_panel(session)
 
     if errors and not updates:
-        return error_panel("\n".join(errors) + PARAMS_HINT)
+        return error_panel("\n".join(errors) + PARAMS_HINT, markup=True)
 
     session.params = apply(session.params, updates)
     lines = ["Применено: " + ", ".join(
@@ -535,7 +536,8 @@ def chat_loop(console: Console, keys, session: Session,
             notice = error_panel(
                 "{}.\n[dim]Начните новый диалог командой /new, сократите вопрос "
                 "или разрешите забывать начало разговора: "
-                "--set history.on_overflow=trim.[/]".format(exc))
+                "--set history.on_overflow=trim.[/]".format(escape(str(exc))),
+                markup=True)
             continue
         if forgotten:
             # Молча забыть начало разговора нельзя: следующий ответ модели

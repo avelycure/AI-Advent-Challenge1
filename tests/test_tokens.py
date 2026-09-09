@@ -524,3 +524,45 @@ def test_overflow_is_recognised_however_the_provider_words_it():
                     "Input is too many tokens for this context window",
                     "Please reduce the length of the messages"):
         assert "Контекст переполнен" in describe_error(BadRequestError(wording)), wording
+
+
+def test_the_provider_own_words_are_shown_after_the_advice():
+    """Точный размер по счёту провайдера — то, ради чего эту ошибку и читают."""
+    from llmagent.transport.client import describe_error
+
+    explained = describe_error(BadRequestError(REAL_OVERFLOW))
+    assert "Контекст переполнен" in explained
+    assert "Провайдер:" in explained
+    for number in ("65536", "141100", "141000"):
+        assert number in explained
+    # Обёртка SDK человеку не нужна: только строка, которую написал провайдер.
+    assert "Error code" not in explained
+    assert "'code': 400" not in explained
+
+
+def test_a_provider_without_a_message_field_gets_only_the_advice():
+    from llmagent.transport.client import describe_error
+
+    explained = describe_error(BadRequestError("context_length_exceeded"))
+    assert "Контекст переполнен" in explained
+    assert "Провайдер:" not in explained
+
+
+def test_provider_words_are_shown_literally_not_as_markup():
+    """В тексте провайдера бывают квадратные скобки, и rich принимает их за разметку.
+
+    Без экранирования «[bold]» и «[see docs]» пропадали из сообщения молча,
+    а «[/]» роняло весь чат с MarkupError — ровно там, где человеку нужны
+    точные цифры.
+    """
+    import io
+
+    from rich.console import Console
+
+    from llmchat.ui import error_panel
+
+    for payload in ("длина [bold] превышена", "смотри [see docs]", "лишний [/] в тексте"):
+        console = Console(file=io.StringIO(), width=120)
+        console.print(error_panel(payload))
+        shown = console.file.getvalue()
+        assert payload in " ".join(shown.split()), payload
