@@ -480,3 +480,47 @@ def test_only_send_skips_the_guard():
     agent = agent_with(ScriptedClient(["Ответ."]),
                        history=HistoryConfig(window=1500, on_overflow="send"))
     assert agent.sends_anyway
+
+
+# --------------------------------------------------------------------------
+# Отказ провайдера
+# --------------------------------------------------------------------------
+
+# Подлинный ответ OpenRouter на запрос шире окна — снят живым прогоном.
+REAL_OVERFLOW = (
+    "Error code: 400 - {'error': {'message': \"This endpoint's maximum context "
+    "length is 65536 tokens. However, you requested about 141100 tokens (141000 "
+    "of text input, 100 in the output). Please reduce the length of either one.\", "
+    "'code': 400}}")
+
+
+class BadRequestError(Exception):
+    """Имя как у исключения SDK: разбор смотрит именно на него."""
+
+
+def test_real_overflow_answer_is_explained_not_dumped():
+    """Отказ приходит с кодом 400, и общая ветка про 400 его перехватывала."""
+    from llmagent.transport.client import describe_error
+
+    explained = describe_error(BadRequestError(REAL_OVERFLOW))
+    assert "Контекст переполнен" in explained
+    assert "/new" in explained
+    assert "Error code" not in explained
+
+
+def test_other_bad_requests_are_still_shown_as_they_are():
+    from llmagent.transport.client import describe_error
+
+    explained = describe_error(BadRequestError("Error code: 400 - unknown parameter foo"))
+    assert "отклонил запрос (400)" in explained
+    assert "unknown parameter foo" in explained
+
+
+def test_overflow_is_recognised_however_the_provider_words_it():
+    from llmagent.transport.client import describe_error
+
+    for wording in ("context_length_exceeded",
+                    "This model's maximum context length is 4095 tokens",
+                    "Input is too many tokens for this context window",
+                    "Please reduce the length of the messages"):
+        assert "Контекст переполнен" in describe_error(BadRequestError(wording)), wording

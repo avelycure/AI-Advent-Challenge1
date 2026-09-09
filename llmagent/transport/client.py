@@ -157,11 +157,32 @@ def describe_error(exc: Exception) -> str:
                 "но баланс нулевой — пополните его или запустите ./run.sh --demo.")
     if name in {"APIConnectionError", "APITimeoutError"} or "Connection" in name:
         return "Не удалось связаться с API: проверьте сеть, прокси или VPN."
+    # Раньше общей ветки про 400: переполнение контекста приходит именно
+    # с этим кодом, и, стоя ниже, объяснение не срабатывало никогда — человек
+    # вместо совета получал сырой JSON провайдера.
+    if _about_context_length(lowered):
+        return ("Контекст переполнен: диалог не помещается в окно модели. "
+                "Начните новый диалог командой /new или задайте вопрос короче.")
     if name == "BadRequestError" or "400" in text:
         return "Провайдер отклонил запрос (400): {}".format(_compact(text))
-    if "context" in text.lower() and "length" in text.lower():
-        return "Контекст переполнен — начните новый диалог командой /new."
     return "{}: {}".format(name, _compact(text) or "неизвестная ошибка")
+
+
+# Как разные провайдеры называют одно и то же переполнение. Проверено живьём
+# на OpenRouter: «This endpoint's maximum context length is 65536 tokens.
+# However, you requested about 141100 tokens».
+CONTEXT_LENGTH_PHRASES = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "context window",
+    "too many tokens",
+    "reduce the length of the messages",
+)
+
+
+def _about_context_length(lowered: str) -> bool:
+    return any(phrase in lowered for phrase in CONTEXT_LENGTH_PHRASES)
 
 
 # Сколько раз запрос можно переписать под отказ провайдера, прежде чем сдаться.
