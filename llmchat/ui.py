@@ -56,11 +56,41 @@ def read_user_line(console: Console, prompt: str) -> str:
     пропадали из той строки, где их набрали. Поэтому очередь читается только
     внутри незакрытой вставки, и никогда — просто так.
     """
-    first = console.input(prompt)
+    first = input(_editable_prompt(console, prompt))
     pasting = _paste_started(first)
     whole = first + "\n" + _paste_tail() if pasting and not _paste_ended(first) else first
     whole = _without_markers(whole, pasting)
     return "\n".join(line.rstrip("\r") for line in whole.split("\n")).strip()
+
+
+# Цвет в подсказке места на экране не занимает, а readline считает длину
+# в символах и без пометки принял бы его за текст.
+COLOUR_SEQUENCE = re.compile(r"\x1b\[[0-9;]*m")
+READLINE_INVISIBLE_START = "\001"
+READLINE_INVISIBLE_END = "\002"
+
+
+def _editable_prompt(console: Console, prompt: str) -> str:
+    """Подсказка в том виде, в каком её должен получить ``input``.
+
+    Отдать её именно ``input`` обязательно. Прежде подсказку печатал rich, а
+    ``input`` получал пустую строку — readline о напечатанном не знал и считал,
+    что строка начинается с нулевой колонки. Стоило стереть набранное слово, и
+    он затирал строку целиком вместе с «Вы ›».
+
+    Цвета помечаются как непечатаемые. Без пометки readline посчитал бы их за
+    ширину подсказки и ошибся бы в другую сторону — курсор поехал бы вправо.
+    """
+    with console.capture() as captured:
+        console.print(prompt, end="")
+    rendered = captured.get()
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # Пометки понимает только readline, а он работает лишь на терминале.
+        # В отведённом в файл выводе они остались бы видимым мусором.
+        return rendered
+    return COLOUR_SEQUENCE.sub(
+        lambda found: READLINE_INVISIBLE_START + found.group(0) + READLINE_INVISIBLE_END,
+        rendered)
 
 
 # Обрамление «скобочной вставки» приходит в трёх видах. Целиком — если строку

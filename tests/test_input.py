@@ -84,6 +84,17 @@ class Terminal:
         return ESCAPES.sub("", "".join(self.seen))
 
     @property
+    def line(self) -> str:
+        """Что сейчас видно в нижней строке экрана.
+
+        Простейший эмулятор: возврат каретки, забой и очистка до конца строки.
+        Больше ничего и не нужно — readline перерисовывает строку именно ими,
+        а без такого разбора видно только поток вывода, а не экран, и стёртое
+        в нём неотличимо от оставшегося.
+        """
+        return _replay("".join(self.seen))
+
+    @property
     def questions(self) -> list:
         """Что заглушка получила: она повторяет заданный ей вопрос."""
         seen = []
@@ -91,6 +102,36 @@ class Terminal:
             if found not in seen:
                 seen.append(found)
         return seen
+
+
+# Управляющие последовательности, меняющие содержимое строки. Прочие для
+# разбора неважны: цвет на то, что видно в строке, не влияет.
+ERASE_TO_END = "\x1b[K"
+
+
+def _replay(raw: str) -> str:
+    line: list = []
+    index = 0
+    while index < len(raw):
+        if raw.startswith(ERASE_TO_END, index):
+            index += len(ERASE_TO_END)
+            continue
+        found = ESCAPES.match(raw, index)
+        if found:
+            index = found.end()
+            continue
+        char = raw[index]
+        index += 1
+        if char == "\r":
+            line = []
+        elif char == "\n":
+            line = []
+        elif char == "\b":
+            if line:
+                line.pop()
+        else:
+            line.append(char)
+    return "".join(line).rstrip()
 
 
 @pytest.fixture
@@ -151,3 +192,21 @@ def test_a_paste_does_not_corrupt_the_text_inside_it(terminal):
     session.wait(6.0)
     assert session.questions
     assert "?v=201~2" in session.questions[0]
+
+
+def test_erasing_a_word_does_not_wipe_the_prompt(terminal):
+    """Подсказка «Вы ›» обязана пережить стирание набранного.
+
+    Пока подсказку печатал rich, а input получал пустую строку, readline
+    считал, что строка начинается с нулевой колонки, и, стирая слово, затирал
+    подсказку вместе с ним. На экране оставалась пустота.
+    """
+    session = terminal()
+    session.type("привет")
+    session.wait(0.5)
+    assert "Вы ›" in session.line and "привет" in session.line
+
+    session.type("\x7f" * 6)
+    session.wait(0.7)
+    assert "Вы ›" in session.line
+    assert "привет" not in session.line
