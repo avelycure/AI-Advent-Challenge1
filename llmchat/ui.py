@@ -732,7 +732,8 @@ def warning_panel(text: str) -> RenderableType:
 def tokens_panel(session: Session) -> RenderableType:
     """Ответ на три вопроса: из чего запрос, во что верить, как растёт цена."""
     breakdown = session.breakdown()
-    blocks = [_request_table(breakdown), _accuracy_line(breakdown)]
+    blocks = [_request_table(breakdown), _accuracy_line(breakdown),
+              _compression_line(breakdown, session)]
     steps = session.growth()
     if steps:
         blocks += [Text(), _growth_table(steps)]
@@ -788,6 +789,32 @@ def _accuracy_line(breakdown) -> Text:
     if abs(breakdown.scale - 1.0) > 0.005:
         line.append(", и она уже учтена: оценка умножается на {:.2f}".format(
             breakdown.scale), style="dim")
+    return line
+
+
+def _compression_line(breakdown, session: Session) -> Text:
+    """Что даёт сжатие истории — или почему его пока нет."""
+    line = Text()
+    line.append("Сжатие истории: ", style="dim")
+    policy = session.compression
+    if not policy.enabled:
+        line.append("выключено, в модель уходит вся переписка", style="yellow")
+        return line
+    if not breakdown.folded_messages:
+        line.append("включено")
+        line.append("  ·  пересказ появится, когда сверх последних {} сообщений "
+                    "накопится ещё {}".format(policy.keep_last, policy.every),
+                    style="dim")
+    else:
+        line.append("{} {} свёрнуто в пересказ на {}".format(
+            breakdown.folded_messages,
+            plural(breakdown.folded_messages, ("сообщение", "сообщения", "сообщений")),
+            fmt(breakdown.summary)), style="green")
+        line.append("  ·  вместо {}: экономия {} на каждом запросе".format(
+            fmt(breakdown.folded), fmt(breakdown.saved)), style="dim")
+    note = session.compression_note
+    if note:
+        line.append("\nПрошлое сжатие не удалось: {}".format(note), style="yellow")
     return line
 
 
@@ -856,6 +883,8 @@ COMMANDS: List[tuple] = [
     ("/history", "показать всю переписку целиком"),
     ("/stats", "подробная статистика по токенам"),
     ("/tokens", "из чего сложится следующий запрос и как росла цена диалога"),
+    ("/summary", "пересказ, которым заменено начало разговора"),
+    ("/compress", "свернуть начало разговора в пересказ прямо сейчас"),
     ("/rename", "переименовать сессию — по имени её потом видно в --sessions"),
     ("/config", "конфиг агента целиком — его можно сохранить и запустить с --config"),
     ("/agent", "вызвать под-агента с нужным конфигом; без аргументов — список конфигов"),

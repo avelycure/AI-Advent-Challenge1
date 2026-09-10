@@ -33,6 +33,7 @@ from llmagent import (
     Agent,
     AgentConfig,
     AgentError,
+    CompressionConfig,
     ConfigError,
     ContextOverflow,
     HistoryConfig,
@@ -332,9 +333,16 @@ def check_memory(console: Console, agent: Agent) -> Optional[bool]:
 
 
 def make_agent(base: AgentConfig, name: str, **history) -> Agent:
-    """Один и тот же конфиг во всех прогонах, кроме окна и поведения при отказе."""
+    """Один и тот же конфиг во всех прогонах, кроме окна и поведения при отказе.
+
+    Сжатие истории здесь выключено намеренно. Оно ровно затем и сделано, чтобы
+    разговор в окно помещался, и с ним этот показ мерил бы не переполнение и не
+    обрезку, а то, как хорошо сжатие им мешает случиться. Сжатие рядом с ними
+    показывает ``./compress.sh``.
+    """
     return Agent(base.with_changes(
-        name=name, history=HistoryConfig(window=WINDOW, **history)))
+        name=name, history=HistoryConfig(
+            window=WINDOW, compression=CompressionConfig(enabled=False), **history)))
 
 
 # --------------------------------------------------------------------------

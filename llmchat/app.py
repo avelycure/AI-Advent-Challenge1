@@ -121,6 +121,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                       help="потолок трат за сессию")
     tune.add_argument("--no-history", action="store_true",
                       help="отвечать без памяти: каждый вопрос сам по себе")
+    tune.add_argument("--no-compress", action="store_true",
+                      help="не сжимать историю: в модель уходит вся переписка целиком")
+    tune.add_argument("--compress", action="store_true",
+                      help="сжимать историю в пересказ (так и работает по умолчанию)")
+    tune.add_argument("--keep-last", type=int, metavar="ЧИСЛО",
+                      help="сколько последних сообщений уходит в модель дословно")
+    tune.add_argument("--compress-every", type=int, metavar="ЧИСЛО",
+                      help="сколько несжатых сообщений копить до пересказа")
     tune.add_argument("--agent-name", metavar="ИМЯ",
                       help="подпись агента (видна в панелях под-агентов)")
     tune.add_argument("--set", action="append", default=[], metavar="ПОЛЕ=ЗНАЧЕНИЕ",
@@ -467,6 +475,13 @@ def chat_loop(console: Console, keys, session: Session,
             if command in ("/tokens", "/token"):
                 notice = tokens_panel(session)
                 continue
+            if command in ("/summary", "/sum"):
+                notice = summary_panel(session)
+                continue
+            if command == "/compress":
+                notice = compress_now(console, session)
+                remember()
+                continue
             if command == "/config":
                 notice = config_panel(session)
                 continue
@@ -580,6 +595,64 @@ def chat_loop(console: Console, keys, session: Session,
             )
 
     farewell(console, session)
+
+
+def compress_now(console: Console, session: Session) -> RenderableType:
+    """Сжать историю прямо сейчас, не дожидаясь порога.
+
+    Печатается ожидание: пересказ — обычный запрос к модели, и он идёт
+    столько же, сколько ответ на вопрос.
+    """
+    if not session.messages:
+        return warning_panel("Сжимать нечего: разговор ещё не начался.")
+    console.print("[dim]Пересказываю начало разговора…[/]")
+    try:
+        folded = session.agent.compress_history(force=True)
+    except (AgentError, LLMError) as exc:
+        return error_panel("Пересказ не получен: {}".format(exc))
+    if not folded:
+        return info_panel(
+            "Сжимать пока нечего: все сообщения и так уходят в модель дословно.",
+            title="Сжатие", style="cyan")
+    return summary_panel(session, folded=folded)
+
+
+def summary_panel(session: Session, folded: int = 0) -> RenderableType:
+    """Пересказ начала разговора и то, что он даёт."""
+    breakdown = session.breakdown()
+    if not session.summary:
+        return info_panel(waiting_for_summary(session), title="Пересказа пока нет",
+                          style="cyan")
+    head = Text()
+    if folded:
+        head.append("Свёрнуто сообщений: {}\n".format(folded), style="green")
+    head.append("В модель вместо {} сообщений начала уходит пересказ на {} "
+                "{} — на {} {} меньше в каждом запросе.\n".format(
+                    breakdown.folded_messages, fmt(breakdown.summary),
+                    plural(breakdown.summary, ("токен", "токена", "токенов")),
+                    fmt(breakdown.saved),
+                    plural(breakdown.saved, ("токен", "токена", "токенов"))),
+                style="dim")
+    return Panel(Group(head, Text(session.summary)), title="Пересказ начала",
+                 title_align="left", border_style="magenta", box=box.ROUNDED,
+                 padding=(0, 1))
+
+
+def waiting_for_summary(session: Session) -> str:
+    """Почему пересказа ещё нет и когда он появится."""
+    policy = session.compression
+    if not policy.enabled:
+        return ("Сжатие выключено: в модель уходит вся переписка целиком.\n"
+                "[dim]Включить можно при запуске:[/] [cyan]--compress[/]")
+    if session.compression_note:
+        return ("Прошлое сжатие не удалось: {}\n"
+                "[dim]В модель пока уходит вся переписка. Попробовать ещё раз:[/] "
+                "[cyan]/compress[/]".format(escape(session.compression_note)))
+    left = policy.every - max(0, len(session.messages) - policy.keep_last)
+    return ("Начало разговора свернётся в пересказ, когда сверх последних {} "
+            "сообщений накопится ещё {}: осталось {}.\n"
+            "[dim]Не дожидаться:[/] [cyan]/compress[/]".format(
+                policy.keep_last, policy.every, max(1, left)))
 
 
 def rename_session(session: Session, argument: str) -> RenderableType:
@@ -714,6 +787,8 @@ FLAG_FIELDS = (
     ("format", "output.format"),
     ("max_cost", "budget.max_cost"),
     ("agent_name", "name"),
+    ("keep_last", "history.compression.keep_last"),
+    ("compress_every", "history.compression.every"),
 )
 
 
@@ -758,6 +833,12 @@ def named_pairs(args: argparse.Namespace) -> List[tuple]:
             pairs.append((path, value))
     if args.no_history:
         pairs.append(("history.enabled", False))
+    # Сжатие включено по умолчанию, поэтому --compress нужен ровно затем, чтобы
+    # перебить --no-compress из сохранённого запуска или из конфига.
+    if args.no_compress:
+        pairs.append(("history.compression.enabled", False))
+    if args.compress:
+        pairs.append(("history.compression.enabled", True))
     return pairs
 
 

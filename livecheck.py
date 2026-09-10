@@ -508,6 +508,31 @@ def cost_ceiling(harness: Harness) -> Outcome:
                        allowed.get("cost") or 0.0))
 
 
+@scenario("сжатие", "начало разговора сворачивается в пересказ")
+def compression(harness: Harness) -> Outcome:
+    """Порог занижен намеренно: ждать десятка сообщений тут не на что."""
+    talk = "".join("Вопрос {}: расскажи про структуры данных\n".format(number)
+                   for number in range(5))
+    shown = flat(harness.run("--set", "history.compression.every=2",
+                             "--set", "history.compression.keep_last=2",
+                             script="Меня зовут Влад\n" + talk + "/summary\n/tokens\n/stats\n/exit\n",
+                             check=True).stdout)
+    marks = ["Пересказ начала" in shown, "свёрнуто в пересказ" in shown,
+             "сжатие —" in shown]
+    return Outcome(all(marks), "пересказ показан, экономия в /tokens, "
+                               "отдельная строка расхода: {}/3".format(sum(marks)))
+
+
+@scenario("сжатие", "без сжатия в модель уходит вся переписка")
+def no_compression(harness: Harness) -> Outcome:
+    talk = "".join("Вопрос {}: расскажи про структуры данных\n".format(number)
+                   for number in range(5))
+    shown = flat(harness.run("--no-compress",
+                             script=talk + "/tokens\n/exit\n", check=True).stdout)
+    return Outcome("Сжатие истории: выключено" in shown and "Пересказ начала" not in shown,
+                   "пересказа нет, история уходит целиком")
+
+
 @scenario("параметры", "негодное значение отвергается с понятным текстом")
 def bad_values(harness: Harness) -> Outcome:
     cases = [("generation.max_tokens=true", "логическое"),

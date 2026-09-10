@@ -24,8 +24,9 @@ JUDGE = "оценка"
 SIDE = "служебный"
 SUB = "под-агент"
 TOOL = "инструмент"
+SUMMARY = "сжатие"
 
-KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB, TOOL)
+KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB, TOOL, SUMMARY)
 
 
 @dataclass

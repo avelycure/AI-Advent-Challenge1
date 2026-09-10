@@ -6,6 +6,7 @@ import pytest
 from llmagent import (
     Agent,
     AgentConfig,
+    CompressionConfig,
     ConfigError,
     ContextOverflow,
     GenerationParams,
@@ -141,7 +142,7 @@ def test_a_trimming_agent_never_refuses_on_its_own_arithmetic():
     сырой, и агент с history.on_overflow=trim всё равно вставал с отказом.
     """
     agent = agent_with(ScriptedClient(["Короткий ответ."]),
-                       history=HistoryConfig(window=1500, on_overflow="trim"))
+                       history=tight(on_overflow="trim"))
     # Провайдер, который считает вдвое экономнее нашего токенизатора.
     agent.ask("Первый вопрос")
     agent.conversation.note_exchange(agent.conversation.exact_estimate // 2, 0,
@@ -252,10 +253,17 @@ def test_unknown_overflow_policy_is_refused():
 # Переполнение: отказ
 # --------------------------------------------------------------------------
 
+# Переполнение проверяется без сжатия истории. Сжатие ровно затем и сделано,
+# чтобы разговор в окно помещался, — и с ним эти тесты мерили бы не отказ и не
+# обрезку, а то, как хорошо сжатие им мешает случиться.
+def tight(**history) -> HistoryConfig:
+    return HistoryConfig(window=1500, compression=CompressionConfig(enabled=False),
+                         **history)
+
+
 def crowded(**history) -> Agent:
     """Агент в тесном окне: переполнение достижимо за десяток вопросов."""
-    return agent_with(ScriptedClient(["Короткий ответ."]),
-                      history=HistoryConfig(window=1500, **history))
+    return agent_with(ScriptedClient(["Короткий ответ."]), history=tight(**history))
 
 
 # Вопрос, который сам по себе шире окна, но короче предела входной политики.
@@ -349,7 +357,7 @@ def test_trimming_drops_a_question_together_with_its_answer():
 def test_every_request_actually_sent_fits_the_window():
     """Обрезка не для красоты: провайдер не должен увидеть запрос сверх окна."""
     client = ScriptedClient(["Короткий ответ."])
-    agent = agent_with(client, history=HistoryConfig(window=1500, on_overflow="trim"))
+    agent = agent_with(client, history=tight(on_overflow="trim"))
     for number in range(40):
         agent.ask("Вопрос {}: расскажи подробно про структуры данных".format(number))
     assert client.calls
@@ -449,7 +457,7 @@ def test_a_truncated_answer_is_not_an_overflow():
 def test_send_lets_the_provider_have_the_last_word():
     """Своя проверка молчит: показать надо именно отказ провайдера."""
     client = ScriptedClient(["Короткий ответ."])
-    agent = agent_with(client, history=HistoryConfig(window=1500, on_overflow="send"),
+    agent = agent_with(client, history=tight(on_overflow="send"),
                        input=InputPolicy(max_chars=100_000))
     for number in range(40):
         agent.ask("Вопрос {}: расскажи подробно про структуры данных".format(number))
@@ -459,7 +467,7 @@ def test_send_lets_the_provider_have_the_last_word():
 
 def test_send_does_not_forget_anything():
     agent = agent_with(ScriptedClient(["Короткий ответ."]),
-                       history=HistoryConfig(window=1500, on_overflow="send"))
+                       history=tight(on_overflow="send"))
     agent.ask("Меня зовут Иван")
     for number in range(30):
         agent.ask("Вопрос {}: расскажи подробно про структуры данных".format(number))
@@ -468,7 +476,7 @@ def test_send_does_not_forget_anything():
 
 def test_send_passes_a_single_question_wider_than_the_window():
     agent = agent_with(ScriptedClient(["Короткий ответ."]),
-                       history=HistoryConfig(window=1500, on_overflow="send"))
+                       history=tight(on_overflow="send"))
     assert agent.ask(HUGE).text == "Короткий ответ."
 
 

@@ -16,6 +16,7 @@ from .config import (
     SYSTEM_PROMPT,
     AgentConfig,
     Budget,
+    CompressionConfig,
     HistoryConfig,
     InputPolicy,
     JudgeConfig,
@@ -50,7 +51,8 @@ __version__ = "2.0.0"
 
 __all__ = [
     "Agent", "AgentConfig", "AgentResult", "DEFAULT_CONFIG", "SYSTEM_PROMPT",
-    "InputPolicy", "OutputPolicy", "JudgeConfig", "HistoryConfig", "Budget", "Transport",
+    "InputPolicy", "OutputPolicy", "JudgeConfig", "HistoryConfig", "CompressionConfig",
+    "Budget", "Transport",
     "ToolPolicy", "Toolbox", "ToolSpec", "ToolOutcome", "spawn_agent_spec", "SPAWN_AGENT",
     "GenerationParams", "Schema", "Field", "Check", "Validation",
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",

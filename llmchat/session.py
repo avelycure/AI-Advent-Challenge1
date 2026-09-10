@@ -100,6 +100,19 @@ class Session:
         self.agent.reset()
         self.topic = DEFAULT_TOPIC
 
+    # --- сжатие истории --------------------------------------------------
+    @property
+    def compression(self):
+        return self.agent.config.history.compression
+
+    @property
+    def summary(self) -> str:
+        return self.agent.conversation.summary
+
+    @property
+    def compression_note(self) -> str:
+        return self.agent.compression_note
+
     @property
     def exchanges(self) -> int:
         return self.agent.conversation.exchanges

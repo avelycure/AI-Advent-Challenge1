@@ -13,17 +13,34 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List, Optional
 
+from . import compression
 from . import judge as judging
 from . import policies
 from .breakdown import RequestBreakdown, Step, growth, request_breakdown
 from .config import DEFAULT_CONFIG, AgentConfig
-from .errors import ContextOverflow, LLMError, OutputRejected
-from .history import Conversation
+from .errors import (
+    AgentError,
+    ConfigError,
+    ContextOverflow,
+    LLMError,
+    OutputRejected,
+)
+from .history import Conversation, Message
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .tools import Toolbox, ToolOutcome
-from .transport import Completion, ToolCall, count_message_tokens, request_cost
-from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, TOOL, UsageMeter
+from .transport import (
+    Completion,
+    ToolCall,
+    count_message_tokens,
+    count_text_tokens,
+    request_cost,
+)
+from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, SUMMARY, TOOL, UsageMeter
+
+# Пересказ — работа не творческая: одни и те же сообщения должны сворачиваться
+# в одно и то же, поэтому разброс здесь ни к чему.
+SUMMARY_TEMPERATURE = 0.2
 
 
 class Agent:
@@ -46,6 +63,12 @@ class Agent:
         self.session_id = session_id or uuid.uuid4().hex[:8]
         self.usage = UsageMeter()
         self.conversation = Conversation(keep_last_answer=config.history.keep_last_answer)
+        # Почему сжатие не состоялось в последний раз. Пустая строка — состоялось
+        # или не требовалось. Держится здесь, а не поднимается наверх ошибкой:
+        # неудача пересказа не повод не ответить на вопрос.
+        self.compression_note = ""
+        # С какой длины переписки пробовать сжатие снова после неудачи.
+        self._retry_fold_at = 0
         self._judge_agent: Optional["Agent"] = None
         # Что инструменты делают — приносит вызывающий, какие включены —
         # говорит конфиг. Несовпадение выясняется сразу, а не на первом ответе.
@@ -201,6 +224,13 @@ class Agent:
         breakdown = self.breakdown()
         if breakdown.fits or self.sends_anyway:
             return 0
+        # Сначала сжать, даже если порог ещё не набрался. Обрезка теряет начало
+        # разговора насовсем, пересказ его сохраняет, — и когда выбор между
+        # ними, выбирать нужно пересказ.
+        if self.fold_to_fit():
+            breakdown = self.breakdown()
+            if breakdown.fits:
+                return 0
         if self._config.history.on_overflow != "trim":
             raise ContextOverflow(_overflow_reason(breakdown))
         return self._forget_oldest(breakdown)
@@ -216,9 +246,120 @@ class Agent:
         """
         return self._config.history.on_overflow == "send"
 
+    # --- сжатие истории ---------------------------------------------------
+    def fold_to_fit(self) -> int:
+        """Сжать историю ради места, не дожидаясь порога.
+
+        Зовётся, когда запрос уже не помещается. Ноль означает, что сжатие тут
+        не поможет: сжимать нечего или пересказ выйдет не короче того, что он
+        заменит, — а платить за запрос, который не освободит места, незачем.
+        """
+        policy = self._config.history.compression
+        if not policy.enabled:
+            return 0
+        cut = compression.cut_at(self.conversation, policy.keep_last, 1)
+        if cut <= self.conversation.summarized:
+            return 0
+        block = self.conversation.messages[self.conversation.summarized:cut]
+        if compression.weigh_block(block, count_text_tokens) <= policy.max_tokens:
+            return 0
+        return self.fold_history(force=True)
+
+    def fold_history(self, force: bool = False) -> int:
+        """Сжать начало разговора, если накопилось. Возвращает число сообщений.
+
+        Неудача сжатия не срывает ответ: пересказ — способ сэкономить, а не
+        условие разговора. Если модель его не написала, в запрос уйдёт вся
+        история, как уходила раньше, а причина останется в ``compression_note``.
+        """
+        policy = self._config.history.compression
+        if not policy.enabled or len(self.conversation.messages) < self._retry_fold_at:
+            return 0
+        try:
+            return self.compress_history(force=force)
+        except (AgentError, LLMError) as exc:
+            self.compression_note = str(exc)
+            # Неудачный пересказ — это оплаченный запрос. Повторять его на
+            # каждом следующем вопросе значило бы платить за одну и ту же
+            # неудачу снова и снова, поэтому ждём, пока накопится следующий
+            # кусок.
+            self._retry_fold_at = len(self.conversation.messages) + policy.every
+            return 0
+
+    def compress_history(self, force: bool = False) -> int:
+        """Заменить пересказом всё, кроме последних сообщений.
+
+        Возвращает число сжатых сообщений; ноль означает, что сжимать было
+        нечего. Ошибку запроса поднимает наверх — в отличие от ``fold_history``:
+        сжатия здесь просят намеренно, и промолчать о неудаче было бы обманом.
+        """
+        policy = self._config.history.compression
+        cut = compression.cut_at(self.conversation, policy.keep_last,
+                                 1 if force else policy.every)
+        if cut <= self.conversation.summarized:
+            return 0
+        block = self.conversation.messages[self.conversation.summarized:cut]
+        text = self._summarize(block)
+        folded = cut - self.conversation.summarized
+        self.conversation.absorb_summary(text, cut)
+        self.compression_note = ""
+        self._retry_fold_at = 0
+        return folded
+
+    def _summarize(self, block: List[Message]) -> str:
+        """Пересказ куска переписки, полученный от модели.
+
+        Кусок бывает больше окна — тогда он пересказывается по частям, и
+        каждая следующая часть идёт вместе с итогом предыдущей: так пересказ
+        остаётся связным, а не рассыпается на несвязанные выжимки.
+        """
+        budget = self._summary_budget()
+        if budget < compression.MIN_BLOCK:
+            raise ConfigError(
+                "окна {} не хватает на пересказ: под сжимаемый кусок остаётся "
+                "{} токенов. Уменьшите history.compression.max_tokens (сейчас "
+                "{}) или расширьте history.window".format(
+                    self.context_limit, budget,
+                    self._config.history.compression.max_tokens))
+        block = [compression.clipped(message, budget, count_text_tokens)
+                 for message in block]
+        summary = self.conversation.summary
+        for part in compression.split_to_fit(block, budget, count_text_tokens):
+            summary = self._summary_call(summary, part) or summary
+        if not summary:
+            raise LLMError("модель вернула пустой пересказ")
+        return summary
+
+    def _summary_call(self, previous: str, block: List[Message]) -> str:
+        """Один запрос за пересказом — мимо истории и выходной политики.
+
+        Выходная политика здесь не при чём намеренно: требовать от пересказа
+        JSON или договорный маркер конца значило бы получить обратно не
+        пересказ, а тот же формат, что у основного ответа.
+        """
+        policy = self._config.history.compression
+        completion = self._call(
+            compression.build_request(previous, block, policy.max_tokens),
+            kind=SUMMARY, max_tokens=policy.max_tokens,
+            temperature=SUMMARY_TEMPERATURE, stop=[], response_format={})
+        return completion.text.strip()
+
+    def _summary_budget(self) -> int:
+        """Сколько токенов отведено под сам пересказываемый кусок.
+
+        Из окна вычитается всё, что займёт запрос помимо него: место под
+        ответ-пересказ, прежний пересказ в качестве материала и сама просьба.
+        """
+        policy = self._config.history.compression
+        frame = count_message_tokens(
+            compression.build_request("", [], policy.max_tokens))
+        return max(1, self.context_limit - policy.max_tokens * 2 - frame)
+
     def reset(self) -> None:
         """Забыть диалог. Счётчики расхода остаются: деньги уже потрачены."""
         self.conversation.reset()
+        self.compression_note = ""
+        self._retry_fold_at = 0
 
     def new_session(self) -> str:
         """Начать новую сессию: чистая память, новый счёт и новый идентификатор.
@@ -234,6 +375,8 @@ class Agent:
         """
         self.conversation.reset()
         self.usage = UsageMeter()
+        self.compression_note = ""
+        self._retry_fold_at = 0
         self.session_id = uuid.uuid4().hex[:8]
         return self.session_id
 
@@ -270,6 +413,10 @@ class Agent:
         Вопрос из истории при неудаче не убирается: этот путь для вызывающего,
         который сам положил его туда и сам решает, что делать дальше.
         """
+        # Сжимаем до того, как считать переполнение: пересказ освобождает
+        # место, и проверять окно раньше него значило бы отказывать разговору,
+        # который на самом деле помещается.
+        self.fold_history()
         # Умещаем диалог до сборки сообщений: обрезать историю после того, как
         # запрос собран, — значит отправить в модель прежний, длинный.
         self.fit_context()

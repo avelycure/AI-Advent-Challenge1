@@ -24,6 +24,8 @@ class RequestBreakdown:
     """Что уйдёт в модель прямо сейчас и влезет ли это в окно."""
 
     system: int
+    # Пересказ сжатого начала: то, что уходит в модель вместо него.
+    summary: int
     # Отвеченная часть переписки: то, за что уже платили и заплатят снова.
     history: int
     # Вопрос, на который ответа ещё нет. Обычно один, но после `/new` в память
@@ -38,11 +40,20 @@ class RequestBreakdown:
     measured_estimate: int = 0
     # Поправка к локальной оценке, выведенная из этой сверки.
     scale: float = 1.0
+    # Что осталось за пересказом: сколько сообщений и во сколько токенов они
+    # обошлись бы, уйди они в модель дословно.
+    folded_messages: int = 0
+    folded: int = 0
+
+    @property
+    def saved(self) -> int:
+        """Сколько токенов сжатие снимает с каждого следующего запроса."""
+        return max(0, self.folded - self.summary)
 
     @property
     def estimated_input(self) -> int:
         """Размер запроса по локальной оценке — без единого обращения к API."""
-        return self.system + self.history + self.pending + self.overhead
+        return self.system + self.summary + self.history + self.pending + self.overhead
 
     @property
     def input_tokens(self) -> int:
@@ -89,6 +100,7 @@ class RequestBreakdown:
         """
         named = [
             Part("Системный промпт", self.system),
+            Part("Пересказ начала", self.summary),
             Part("История диалога", self.history),
             Part("Новый вопрос", self.pending),
             Part("Служебная разметка", self.overhead),
@@ -138,14 +150,21 @@ def request_breakdown(conversation: Conversation, system_prompt: str,
     Отвеченным считается всё до последнего вопроса без ответа: именно эта
     граница отделяет то, за что уже платили, от того, за что заплатят впервые.
 
+    Сжатое начало в историю не входит: его в запросе нет. Вместо него считается
+    пересказ, а сами свёрнутые сообщения — отдельно, чтобы было видно, сколько
+    сжатие сберегает.
+
     Считается по всем сообщениям подряд, а из подряд идущих ответов в запрос
     уходит только последний. Значит, раскладка бывает щедрее настоящего
     запроса, но никогда не скупее, — и «влезает» здесь означает «влезет и там».
     """
-    edge = _pending_from(conversation)
+    folded_to = conversation.summarized
+    edge = max(folded_to, _pending_from(conversation))
     return RequestBreakdown(
         system=(count_text_tokens(system_prompt) + MESSAGE_OVERHEAD) if system_prompt else 0,
-        history=_weigh_span(conversation, 0, edge),
+        summary=(count_text_tokens(conversation.summary_message()["content"])
+                 + MESSAGE_OVERHEAD) if conversation.summary else 0,
+        history=_weigh_span(conversation, folded_to, edge),
         pending=_weigh_span(conversation, edge, len(conversation.messages)),
         overhead=count_message_tokens([]),
         reserve=reserve,
@@ -153,6 +172,8 @@ def request_breakdown(conversation: Conversation, system_prompt: str,
         measured=conversation.exact_context,
         measured_estimate=conversation.exact_estimate,
         scale=conversation.scale,
+        folded_messages=folded_to,
+        folded=_weigh_span(conversation, 0, folded_to),
     )
 
 

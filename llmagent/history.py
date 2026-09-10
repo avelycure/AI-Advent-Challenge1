@@ -15,6 +15,11 @@ from .transport import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
 MIN_SCALE = 0.5
 MAX_SCALE = 2.0
 
+# Чем подписан пересказ в запросе. Роль у него ``user``, а не ``system``:
+# системных сообщений некоторые провайдеры принимают ровно одно, а два
+# сообщения пользователя подряд принимают все.
+SUMMARY_PREFIX = "Краткий пересказ более раннего начала этого разговора:\n\n"
+
 
 @dataclass
 class Message:
@@ -43,6 +48,12 @@ class Conversation:
 
     keep_last_answer: bool = True
     messages: List[Message] = field(default_factory=list)
+    # Пересказ начала разговора и граница, до которой он его заменяет.
+    # Сами сообщения остаются на месте: на экране разговор виден целиком, а в
+    # модель вместо начала уходит пересказ. Граница — номер первого сообщения,
+    # которое в пересказ ещё не вошло и потому отправляется дословно.
+    summary: str = ""
+    summarized: int = 0
     # Точный размер диалога по данным API — на момент последнего ответа.
     exact_context: int = 0
     # Своя оценка того же куска переписки. Хранится ради сверки: без неё нельзя
@@ -76,6 +87,22 @@ class Conversation:
         self.messages.append(message)
         return message
 
+    def absorb_summary(self, text: str, upto: int) -> None:
+        """Заменить начало разговора пересказом по сообщение ``upto`` не включая.
+
+        Сами сообщения остаются: разговор виден на экране целиком и целиком же
+        ложится в файл сессии. Меняется только то, что уходит в модель.
+        """
+        self.summary = text.strip()
+        self.summarized = max(0, min(upto, len(self.messages)))
+        # Точный размер измерен для несжатой переписки: с этой минуты он
+        # описывает не тот запрос, который уйдёт следующим.
+        self.forget_exact()
+
+    def forget_summary(self) -> None:
+        self.summary = ""
+        self.summarized = 0
+
     def drop_last_user(self) -> None:
         """Убрать неотвеченное сообщение, чтобы история не осталась битой."""
         if self.messages and self.messages[-1].role == "user":
@@ -84,15 +111,19 @@ class Conversation:
     def drop_oldest_exchange(self) -> int:
         """Забыть самый старый обмен «вопрос — ответ». Возвращает число сообщений.
 
+        Забывается самый старый из тех, что действительно уходят в модель:
+        сжатое начало выбрасывать бессмысленно — в запросе его и так нет,
+        а с экрана и из пересказа оно бы при этом пропало.
+
         Ноль означает, что забывать больше нечего: в переписке не осталось ни
         одного отвеченного вопроса, а неотвеченный — то, ради чего идёт запрос.
         """
-        first_answer = next((index for index, message in enumerate(self.messages)
-                             if message.role == "assistant"), -1)
+        first_answer = next((index for index in range(self.summarized, len(self.messages))
+                             if self.messages[index].role == "assistant"), -1)
         if first_answer < 0:
             return 0
-        removed = first_answer + 1
-        del self.messages[:removed]
+        removed = first_answer + 1 - self.summarized
+        del self.messages[self.summarized:first_answer + 1]
         # Точный размер измерен для прежней, более длинной переписки: оставить
         # его значило бы считать по нему обрезанный диалог.
         self.forget_exact()
@@ -100,6 +131,7 @@ class Conversation:
 
     def reset(self) -> None:
         self.messages.clear()
+        self.forget_summary()
         self.forget_model()
 
     def forget_model(self) -> None:
@@ -153,13 +185,25 @@ class Conversation:
         return self.api_messages_upto(len(self.messages) - 1, system_prompt)
 
     def api_messages_upto(self, index: int, system_prompt: str) -> List[Dict[str, str]]:
-        """История по указанное сообщение включительно — для повторного запроса."""
+        """История по указанное сообщение включительно — для повторного запроса.
+
+        Сжатое начало заменяется пересказом. Исключение — повтор вопроса,
+        который сам попал в пересказ: пересказ ответа на него не заменит, и
+        такая история собирается из настоящих сообщений, с самого начала.
+        """
         payload = [{"role": "system", "content": system_prompt}] if system_prompt else []
-        chosen = self.messages[:index + 1]
+        folded = bool(self.summary) and index >= self.summarized
+        if folded:
+            payload.append(self.summary_message())
+        chosen = self.messages[self.summarized if folded else 0:index + 1]
         if self.keep_last_answer:
             chosen = keep_last_answer(chosen)
         payload += [{"role": m.role, "content": m.content} for m in chosen]
         return payload
+
+    def summary_message(self) -> Dict[str, str]:
+        """Пересказ в том виде, в каком он уходит в модель."""
+        return {"role": "user", "content": SUMMARY_PREFIX + self.summary}
 
     def context_used(self, system_prompt: str) -> int:
         """Размер диалога: точные данные API плюс оценка неотправленного хвоста."""
@@ -180,6 +224,8 @@ class Conversation:
             "exact_context": self.exact_context,
             "exact_estimate": self.exact_estimate,
             "scale": self.scale,
+            "summary": self.summary,
+            "summarized": self.summarized,
             "messages": [asdict(message) for message in self.messages],
         }
 
@@ -195,9 +241,17 @@ class Conversation:
         conversation.exact_context = int(payload.get("exact_context", 0) or 0)
         conversation.exact_estimate = int(payload.get("exact_estimate", 0) or 0)
         conversation.scale = float(payload.get("scale", 1.0) or 1.0)
+        conversation.summary = str(payload.get("summary", "") or "")
         for item in payload.get("messages", []):
             conversation.messages.append(
                 Message(**{k: v for k, v in item.items() if k in known}))
+        # Границу ставим после сообщений и не дальше их конца: файл мог быть
+        # записан другой версией, а граница за краем списка отправила бы в
+        # модель один пересказ без единого сообщения.
+        conversation.summarized = max(0, min(int(payload.get("summarized", 0) or 0),
+                                             len(conversation.messages)))
+        if not conversation.summary:
+            conversation.summarized = 0
         return conversation
 
 

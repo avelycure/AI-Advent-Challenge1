@@ -11,6 +11,12 @@ input:
   max_chars: 500
   on_too_long: trim     # длинный запрос обрезается, а не отклоняется
   forbid_empty: true
+history:
+  compression:
+    enabled: true
+    keep_last: 4        # дословно уходят только последние четыре сообщения
+    every: 6            # пересказ обновляется чаще обычного
+    max_tokens: 250     # и сам он короче обычного
 budget:
   max_tokens: 50000
   max_cost: 0.05

@@ -164,6 +164,37 @@ OVERFLOW_POLICIES = ("stop", "trim", "send")
 
 
 @dataclass(frozen=True)
+class CompressionConfig:
+    """Сжатие истории: старое начало разговора заменяется пересказом.
+
+    Смысл — в цене. В модель каждый раз уходит вся переписка целиком, поэтому
+    десятый вопрос стоит вчетверо дороже первого, набранный теми же словами.
+    Пересказ на четыре сотни токенов вместо трёх тысяч сообщений эту цену
+    возвращает к началу, а разговор при этом продолжается: имя, условие задачи
+    и договорённости остаются в пересказе, а не пропадают, как при обрезке.
+    """
+
+    enabled: bool = True
+    # Сколько последних сообщений уходит в модель дословно. Меньше двух
+    # бессмысленно: в паре «вопрос — ответ» уже два сообщения, и сжимать
+    # разговор до одной реплики значит отдать модели её же ответ без вопроса.
+    keep_last: int = 6
+    # Сколько несжатых сообщений должно накопиться сверх этого хвоста, чтобы
+    # был смысл платить за отдельный запрос к модели.
+    every: int = 10
+    max_tokens: int = 400
+
+    def __post_init__(self) -> None:
+        if self.keep_last < 2:
+            raise ConfigError("history.compression.keep_last: минимум 2 — иначе "
+                              "в запрос уйдёт ответ без своего вопроса")
+        if self.every < 1:
+            raise ConfigError("history.compression.every: минимум 1")
+        if self.max_tokens < 1:
+            raise ConfigError("history.compression.max_tokens: минимум 1")
+
+
+@dataclass(frozen=True)
 class HistoryConfig:
     enabled: bool = True
     # Из подряд идущих ответов в запрос уходит только последний.
@@ -176,6 +207,8 @@ class HistoryConfig:
     # "trim" — забыть начало разговора и продолжить, "send" — отправить как
     # есть и показать, что на это скажет провайдер.
     on_overflow: str = "stop"
+    # Сжатие старого начала разговора в пересказ.
+    compression: CompressionConfig = field(default_factory=CompressionConfig)
 
     def __post_init__(self) -> None:
         if self.on_overflow not in OVERFLOW_POLICIES:
@@ -373,6 +406,7 @@ _NESTED: Dict[str, Any] = {
     "judge": JudgeConfig,
     "tools": ToolPolicy,
     "history": HistoryConfig,
+    "compression": CompressionConfig,
     "budget": Budget,
     "transport": Transport,
     "schema": formats.Schema,
