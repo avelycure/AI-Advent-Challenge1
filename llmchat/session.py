@@ -100,7 +100,19 @@ class Session:
         self.agent.reset()
         self.topic = DEFAULT_TOPIC
 
-    # --- сжатие истории --------------------------------------------------
+    # --- стратегия управления контекстом ----------------------------------
+    @property
+    def history(self):
+        return self.agent.config.history
+
+    @property
+    def strategy(self) -> str:
+        return self.agent.config.history.strategy
+
+    @property
+    def keep_last(self) -> int:
+        return self.agent.conversation.keep_last
+
     @property
     def compression(self):
         return self.agent.config.history.compression
@@ -112,6 +124,27 @@ class Session:
     @property
     def compression_note(self) -> str:
         return self.agent.compression_note
+
+    @property
+    def facts(self) -> Dict[str, str]:
+        return self.agent.conversation.facts
+
+    @property
+    def facts_note(self) -> str:
+        return self.agent.facts_note
+
+    # --- ветки разговора ---------------------------------------------------
+    @property
+    def branches(self):
+        return self.agent.branches
+
+    @property
+    def branch(self) -> str:
+        return self.agent.branches.active
+
+    @property
+    def branched(self) -> bool:
+        return self.agent.branches.branched
 
     @property
     def exchanges(self) -> int:

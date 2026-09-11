@@ -257,7 +257,7 @@ def test_unknown_overflow_policy_is_refused():
 # чтобы разговор в окно помещался, — и с ним эти тесты мерили бы не отказ и не
 # обрезку, а то, как хорошо сжатие им мешает случиться.
 def tight(**history) -> HistoryConfig:
-    return HistoryConfig(window=1500, compression=CompressionConfig(enabled=False),
+    return HistoryConfig(window=1500, strategy="full",
                          **history)
 
 

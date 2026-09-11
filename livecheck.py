@@ -514,10 +514,10 @@ def compression(harness: Harness) -> Outcome:
     talk = "".join("Вопрос {}: расскажи про структуры данных\n".format(number)
                    for number in range(5))
     shown = flat(harness.run("--set", "history.compression.every=2",
-                             "--set", "history.compression.keep_last=2",
+                             "--set", "history.keep_last=2",
                              script="Меня зовут Влад\n" + talk + "/summary\n/tokens\n/stats\n/exit\n",
                              check=True).stdout)
-    marks = ["Пересказ начала" in shown, "свёрнуто в пересказ" in shown,
+    marks = ["Пересказ начала" in shown, "вместо них пересказ" in shown,
              "сжатие —" in shown]
     return Outcome(all(marks), "пересказ показан, экономия в /tokens, "
                                "отдельная строка расхода: {}/3".format(sum(marks)))
@@ -529,8 +529,90 @@ def no_compression(harness: Harness) -> Outcome:
                    for number in range(5))
     shown = flat(harness.run("--no-compress",
                              script=talk + "/tokens\n/exit\n", check=True).stdout)
-    return Outcome("Сжатие истории: выключено" in shown and "Пересказ начала" not in shown,
+    return Outcome("В модель уходит вся переписка целиком" in shown
+                   and "Пересказ начала" not in shown,
                    "пересказа нет, история уходит целиком")
+
+
+@scenario("стратегии", "скользящее окно отправляет только хвост переписки")
+def sliding_window(harness: Harness) -> Outcome:
+    talk = "".join("Вопрос {}: расскажи про структуры данных\n".format(number)
+                   for number in range(5))
+    shown = flat(harness.run("--strategy", "window", "--keep-last", "4",
+                             script="Меня зовут Влад\n" + talk + "/tokens\n/exit\n",
+                             check=True).stdout)
+    marks = ["Стратегия: window" in shown, "не уходят в модель" in shown,
+             "Пересказ начала" not in shown]
+    return Outcome(all(marks), "хвост из 4 сообщений, остальное не отправляется: "
+                               "{}/3".format(sum(marks)))
+
+
+@scenario("стратегии", "стратегия переключается прямо в разговоре")
+def switch_strategy(harness: Harness) -> Outcome:
+    shown = flat(harness.run(
+        script="Меня зовут Влад\n/strategy\n/strategy window\n/tokens\n/exit\n",
+        check=True).stdout)
+    marks = ["Чем стратегии отличаются" in shown, "Стратегия теперь window" in shown,
+             "Стратегия: window" in shown]
+    return Outcome(all(marks), "список стратегий, переключение и новая "
+                               "раскладка: {}/3".format(sum(marks)))
+
+
+@scenario("стратегии", "факт записывается руками и уходит в модель")
+def facts_by_hand(harness: Harness) -> Outcome:
+    """Заглушка объекта JSON не вернёт, поэтому картотеку здесь наполняет человек.
+
+    Что её наполняет модель, проверяет живой прогон: там же видно, что запрос
+    за фактами считается отдельной строкой расхода.
+    """
+    shown = flat(harness.run(
+        "--strategy", "facts", "--keep-last", "2",
+        script="/facts срок=к 1 марта\nВопрос про сроки\n/tokens\n/facts\n/exit\n",
+        check=True).stdout)
+    marks = ["срок" in shown and "к 1 марта" in shown,
+             "Факты разговора" in shown, "Стратегия: facts" in shown]
+    return Outcome(all(marks), "факт записан, виден и учтён в раскладке: "
+                               "{}/3".format(sum(marks)))
+
+
+@scenario("стратегии", "картотеку наполняет модель, а не человек", live_only=True)
+def facts_by_model(harness: Harness) -> Outcome:
+    shown = flat(harness.run(
+        "--strategy", "facts", "--keep-last", "2",
+        script="Собираем ТЗ: платформа Android, бюджет 300 тысяч рублей\n"
+               "Что должно быть на главном экране?\n/facts\n/stats\n/exit\n",
+        check=True).stdout)
+    marks = ["Android" in shown, "300" in shown, "факты —" in shown]
+    return Outcome(all(marks), "картотека собрана моделью, её запрос виден "
+                               "отдельной строкой: {}/3".format(sum(marks)))
+
+
+@scenario("ветки", "две ветки от одной точки не видят друг друга")
+def branching(harness: Harness) -> Outcome:
+    shown = flat(harness.run(
+        script="Собираем ТЗ: платформа Android\n/checkpoint выбор\n"
+               "/branch нативная\nПишем на Kotlin\n"
+               "/branch кросс выбор\nПишем на Flutter\n"
+               "/switch нативная\n/history\n/branches\n/exit\n",
+        check=True).stdout)
+    marks = ["Ветка «нативная» отведена" in shown, "Пишем на Kotlin" in shown,
+             "Пишем на Flutter" not in shown.split("Разговор продолжается")[-1]]
+    return Outcome(all(marks), "ветки отведены от одной точки, решение соседней "
+                               "в переписку не попало: {}/3".format(sum(marks)))
+
+
+@scenario("ветки", "ветки переживают выход и возврат в сессию")
+def branches_survive(harness: Harness) -> Outcome:
+    harness.fresh_home()
+    first = harness.run(script="Общее начало разговора\n/checkpoint развилка\n"
+                               "/branch а\nТолько в ветке а\n/exit\n", check=True)
+    session = re.search(r"[0-9a-f]{8}", flat(first.stdout))
+    if session is None:
+        return Outcome(False, "не удалось определить идентификатор сессии")
+    shown = flat(harness.run("-c", script="/branches\n/exit\n", check=True).stdout)
+    marks = ["а" in shown, "развилка" in shown, "Только в ветке а" in shown]
+    return Outcome(all(marks), "ветка, точка возврата и её переписка на месте: "
+                               "{}/3".format(sum(marks)))
 
 
 @scenario("параметры", "негодное значение отвергается с понятным текстом")

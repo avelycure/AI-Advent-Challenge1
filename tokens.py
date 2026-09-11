@@ -342,7 +342,7 @@ def make_agent(base: AgentConfig, name: str, **history) -> Agent:
     """
     return Agent(base.with_changes(
         name=name, history=HistoryConfig(
-            window=WINDOW, compression=CompressionConfig(enabled=False), **history)))
+            window=WINDOW, strategy="full", **history)))
 
 
 # --------------------------------------------------------------------------

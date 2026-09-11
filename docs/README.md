@@ -21,6 +21,7 @@
 | [feature-agent.md](feature-agent.md) | агент как отдельная сущность: конфиг, политики, судья, учёт токенов, спавн сотни агентов |
 | [feature-tokens.md](feature-tokens.md) | подсчёт токенов: раскладка запроса, поправка к оценке, рост цены и поведение при переполнении |
 | [feature-compression.md](feature-compression.md) | сжатие истории: пересказ вместо начала разговора, три способа рядом |
+| [feature-context-strategies.md](feature-context-strategies.md) | четыре стратегии управления контекстом, картотека фактов и ветки диалога |
 
 Все эти работы собраны в одной ветке `feature/llm-params`: сначала они велись
 по отдельным веткам, но это раздробило связанные правки одних и тех же файлов
@@ -40,4 +41,6 @@
 Планы по дням лежат рядом с описаниями веток:
 [day7-context-plan.md](day7-context-plan.md) — сохранение контекста,
 [day8-tokens-plan.md](day8-tokens-plan.md) — работа с токенами,
-[day9-compression-plan.md](day9-compression-plan.md) — сжатие истории.
+[day9-compression-plan.md](day9-compression-plan.md) — сжатие истории,
+[day10-strategies-plan.md](day10-strategies-plan.md) — стратегии управления
+контекстом и ветвление.

@@ -2,12 +2,19 @@
 
 История — часть агента, а не интерфейса: от неё зависит, что уйдёт в запрос
 и сколько останется места под ответ. Интерфейс её только показывает.
+
+Здесь же решается, что именно из накопившейся переписки уходит в модель.
+Решает это стратегия: вся переписка, последние N сообщений, факты плюс
+последние N или пересказ начала плюс последние N. Сами сообщения не
+выбрасывает ни одна из них — на экране и в файле сессии разговор остаётся
+целым, меняется только содержимое запроса.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
+from .config import FACTS, SUMMARY, WINDOW
 from .transport import MESSAGE_OVERHEAD, count_message_tokens, count_text_tokens
 
 
@@ -19,6 +26,14 @@ MAX_SCALE = 2.0
 # системных сообщений некоторые провайдеры принимают ровно одно, а два
 # сообщения пользователя подряд принимают все.
 SUMMARY_PREFIX = "Краткий пересказ более раннего начала этого разговора:\n\n"
+
+# Короче этого окно сообщений не сужается: в паре «вопрос — ответ» уже два
+# сообщения, и одно оставило бы модели её же ответ без вопроса.
+MIN_WINDOW_MESSAGES = 2
+
+# Чем подписан блок фактов. Роль та же и по той же причине.
+FACTS_PREFIX = ("Важные сведения из этого разговора, собранные по ходу. "
+                "Считай их действующими и учитывай в ответе:\n\n")
 
 
 @dataclass
@@ -48,12 +63,28 @@ class Conversation:
 
     keep_last_answer: bool = True
     messages: List[Message] = field(default_factory=list)
+    # Как собирается запрос и сколько последних сообщений уходит дословно.
+    # Оба значения принадлежат конфигу и проставляются агентом: переписка их
+    # не выбирает, а исполняет — иначе конфиг перестал бы быть единственным
+    # местом, где сказано, как агент работает.
+    strategy: str = SUMMARY
+    keep_last: int = 6
     # Пересказ начала разговора и граница, до которой он его заменяет.
     # Сами сообщения остаются на месте: на экране разговор виден целиком, а в
     # модель вместо начала уходит пересказ. Граница — номер первого сообщения,
     # которое в пересказ ещё не вошло и потому отправляется дословно.
     summary: str = ""
     summarized: int = 0
+    # Важные сведения разговора: ключ — значение. Порядок — по последнему
+    # обновлению, свежее в конце: по нему вытесняются лишние, когда фактов
+    # накопилось больше, чем условлено.
+    facts: Dict[str, str] = field(default_factory=dict)
+    # Сколько сообщений уже просмотрено на предмет фактов. Ровно та же роль,
+    # что у ``summarized``: без неё каждый разбор фактов пересылал бы в модель
+    # весь разговор заново, и память фактов стоила бы дороже полной истории.
+    facts_seen: int = 0
+    # Предел размера блока фактов в запросе, в токенах. Тоже из конфига.
+    facts_limit: int = 300
     # Точный размер диалога по данным API — на момент последнего ответа.
     exact_context: int = 0
     # Своя оценка того же куска переписки. Хранится ради сверки: без неё нельзя
@@ -103,6 +134,45 @@ class Conversation:
         self.summary = ""
         self.summarized = 0
 
+    def absorb_facts(self, update: Dict[str, str], upto: int,
+                     max_facts: int = 0) -> Dict[str, str]:
+        """Слить разобранные факты с прежними. Возвращает то, что изменилось.
+
+        Слить, а не заменить: модель, которую попросили пересказать факты
+        целиком, один-два всё равно опустит — и они пропали бы, хотя их никто
+        не отменял. Поэтому названное обновляется, неназванное остаётся, а
+        забыть факт можно пустым значением — намеренно и видимо.
+        """
+        changed: Dict[str, str] = {}
+        for key, value in update.items():
+            name = " ".join(str(key).split())
+            if not name:
+                continue
+            text = " ".join(str(value).split()) if value is not None else ""
+            if not text:
+                if self.facts.pop(name, None) is not None:
+                    changed[name] = ""
+                continue
+            if self.facts.get(name) == text:
+                continue
+            # Обновлённый факт уходит в конец: порядок хранит давность, и по
+            # ней вытесняются лишние.
+            self.facts.pop(name, None)
+            self.facts[name] = text
+            changed[name] = text
+        if max_facts > 0:
+            for name in list(self.facts)[:-max_facts]:
+                del self.facts[name]
+        self.facts_seen = max(0, min(upto, len(self.messages)))
+        if changed:
+            # Точный размер измерен для запроса с прежним блоком фактов.
+            self.forget_exact()
+        return changed
+
+    def forget_facts(self) -> None:
+        self.facts = {}
+        self.facts_seen = 0
+
     def drop_last_user(self) -> None:
         """Убрать неотвеченное сообщение, чтобы история не осталась битой."""
         if self.messages and self.messages[-1].role == "user":
@@ -124,14 +194,40 @@ class Conversation:
             return 0
         removed = first_answer + 1 - self.summarized
         del self.messages[self.summarized:first_answer + 1]
+        # Сами факты остаются: обрезка выбрасывает сообщения, а не сведения,
+        # и в этом весь смысл их отдельного хранения. Сдвигается только
+        # отметка просмотренного — иначе следующий разбор фактов начался бы
+        # с чужого места и перечитал бы уже разобранное.
+        self.facts_seen = max(0, self.facts_seen - removed)
         # Точный размер измерен для прежней, более длинной переписки: оставить
         # его значило бы считать по нему обрезанный диалог.
         self.forget_exact()
         return removed
 
+    def narrow_window(self) -> int:
+        """Сузить отправляемое окно на один обмен. Ноль — сужать больше нечего.
+
+        Так освобождают место при скользящем окне и при фактах. Удалять
+        сообщения там бессмысленно: окно отсчитывается от конца, и на месте
+        выброшенной пары в него втянулась бы пара постарше — запрос не
+        уменьшился бы, а разговор на экране поредел бы ни за что.
+
+        Сужение держится, пока настройки не заданы заново, и не пишется в файл
+        сессии: оно про этот диалог с его длинными сообщениями, а не про
+        значение, которое человек выбрал. Стоит поправить конфиг — и окно
+        снова станет заказанным.
+        """
+        if self.keep_last <= MIN_WINDOW_MESSAGES:
+            return 0
+        before = self.keep_last
+        self.keep_last = max(MIN_WINDOW_MESSAGES, self.keep_last - 2)
+        self.forget_exact()
+        return before - self.keep_last
+
     def reset(self) -> None:
         self.messages.clear()
         self.forget_summary()
+        self.forget_facts()
         self.forget_model()
 
     def forget_model(self) -> None:
@@ -187,23 +283,70 @@ class Conversation:
     def api_messages_upto(self, index: int, system_prompt: str) -> List[Dict[str, str]]:
         """История по указанное сообщение включительно — для повторного запроса.
 
-        Сжатое начало заменяется пересказом. Исключение — повтор вопроса,
-        который сам попал в пересказ: пересказ ответа на него не заменит, и
-        такая история собирается из настоящих сообщений, с самого начала.
+        Что именно уйдёт, решает стратегия: вся переписка, последние N
+        сообщений, факты плюс последние N или пересказ начала плюс последние N.
+
+        Исключение одно и общее для всех стратегий — повтор вопроса, который
+        сам остался за границей отправляемого: ни пересказ, ни факты ответа на
+        него не заменят, и такая история собирается из настоящих сообщений,
+        с самого начала.
         """
         payload = [{"role": "system", "content": system_prompt}] if system_prompt else []
-        folded = bool(self.summary) and index >= self.summarized
-        if folded:
+        start = self.sent_from(index)
+        if start and self.strategy == SUMMARY:
             payload.append(self.summary_message())
-        chosen = self.messages[self.summarized if folded else 0:index + 1]
+        if self.strategy == FACTS and self.sent_facts():
+            payload.append(self.facts_message())
+        chosen = self.messages[start:index + 1]
         if self.keep_last_answer:
             chosen = keep_last_answer(chosen)
         payload += [{"role": m.role, "content": m.content} for m in chosen]
         return payload
 
+    def sent_from(self, index: int = -1) -> int:
+        """Номер первого сообщения, которое действительно уходит в модель.
+
+        Всё, что до него, заменено пересказом или просто не отправляется —
+        но с экрана и из файла сессии никуда не делось.
+        """
+        if index < 0:
+            index = len(self.messages) - 1
+        if self.strategy == SUMMARY:
+            return self.summarized if self.summary and index >= self.summarized else 0
+        if self.strategy in (WINDOW, FACTS):
+            return back_to_question(self.messages, index + 1 - self.keep_last, 0)
+        return 0
+
     def summary_message(self) -> Dict[str, str]:
         """Пересказ в том виде, в каком он уходит в модель."""
         return {"role": "user", "content": SUMMARY_PREFIX + self.summary}
+
+    def facts_message(self) -> Dict[str, str]:
+        """Блок фактов в том виде, в каком он уходит в модель."""
+        return {"role": "user", "content": FACTS_PREFIX + self.facts_block()}
+
+    def facts_block(self) -> str:
+        """Факты строками «— ключ: значение», как их прочтёт модель."""
+        return "\n".join("- {}: {}".format(key, value)
+                         for key, value in self.sent_facts().items())
+
+    def sent_facts(self) -> Dict[str, str]:
+        """Факты, которые влезают в отведённый блоку предел.
+
+        Влезают не все — значит, отправляются свежие: факт, обновлённый
+        последним, относится к тому, о чём говорят сейчас. Пустой итог тоже
+        бывает: при совсем тесном пределе стратегия работает как скользящее
+        окно, и об этом сказано на экране, а не скрыто.
+        """
+        budget = self.facts_limit - count_text_tokens(FACTS_PREFIX)
+        kept: List[str] = []
+        for key in reversed(list(self.facts)):
+            budget -= count_text_tokens("- {}: {}\n".format(key, self.facts[key]))
+            if budget < 0:
+                break
+            kept.append(key)
+        kept.reverse()
+        return {key: self.facts[key] for key in kept}
 
     def context_used(self, system_prompt: str) -> int:
         """Размер диалога: точные данные API плюс оценка неотправленного хвоста."""
@@ -226,6 +369,8 @@ class Conversation:
             "scale": self.scale,
             "summary": self.summary,
             "summarized": self.summarized,
+            "facts": dict(self.facts),
+            "facts_seen": self.facts_seen,
             "messages": [asdict(message) for message in self.messages],
         }
 
@@ -252,7 +397,30 @@ class Conversation:
                                              len(conversation.messages)))
         if not conversation.summary:
             conversation.summarized = 0
+        stored = payload.get("facts") or {}
+        if isinstance(stored, dict):
+            conversation.facts = {str(key): str(value) for key, value in stored.items()}
+        conversation.facts_seen = max(0, min(int(payload.get("facts_seen", 0) or 0),
+                                             len(conversation.messages)))
         return conversation
+
+
+def back_to_question(messages: Sequence[Message], edge: int, floor: int) -> int:
+    """Отодвинуть границу назад до вопроса пользователя.
+
+    Граница ставится так, чтобы отправляемое начиналось с вопроса
+    пользователя: ответ без своего вопроса модель прочтёт как ответ неизвестно
+    на что. Поэтому граница только отодвигается назад — отправляемый хвост
+    бывает длиннее заказанного, но никогда не рвётся посередине обмена.
+    """
+    edge = max(floor, min(edge, len(messages)))
+    while edge > floor and not _starts_a_question(messages, edge):
+        edge -= 1
+    return edge
+
+
+def _starts_a_question(messages: Sequence[Message], edge: int) -> bool:
+    return edge < len(messages) and messages[edge].role == "user"
 
 
 def keep_last_answer(messages: List[Message]) -> List[Message]:

@@ -75,9 +75,10 @@ def agent_with(client, keep_last: int = 6, every: int = 10, enabled: bool = True
                max_tokens: int = 400, **history) -> Agent:
     config = AgentConfig(
         name="t", transport=Transport(demo=True, demo_delay=0.0),
-        history=HistoryConfig(compression=CompressionConfig(
-            enabled=enabled, keep_last=keep_last, every=every,
-            max_tokens=max_tokens), **history))
+        history=HistoryConfig(
+            strategy="summary" if enabled else "full", keep_last=keep_last,
+            compression=CompressionConfig(every=every, max_tokens=max_tokens),
+            **history))
     return Agent(config, client=client)
 
 
@@ -92,16 +93,16 @@ def converse(agent: Agent, rounds: int, first: str = "Меня зовут Ива
 # --------------------------------------------------------------------------
 
 def test_compression_is_on_by_default_with_sane_numbers():
-    policy = AgentConfig().history.compression
-    assert policy.enabled
-    assert policy.keep_last >= 2
-    assert policy.every >= 1
+    history = AgentConfig().history
+    assert history.folds
+    assert history.keep_last >= 2
+    assert history.compression.every >= 1
 
 
 def test_a_tail_shorter_than_a_pair_is_refused():
     """Ответ без своего вопроса модель прочтёт как ответ неизвестно на что."""
     with pytest.raises(ConfigError):
-        CompressionConfig(keep_last=1)
+        HistoryConfig(keep_last=1)
 
 
 def test_nonsense_numbers_are_refused():
@@ -113,12 +114,12 @@ def test_nonsense_numbers_are_refused():
 
 def test_settings_are_reachable_from_the_command_line():
     config = overrides.apply(AgentConfig(), [
-        "history.compression.enabled=false",
-        "history.compression.keep_last=4",
+        "history.strategy=full",
+        "history.keep_last=4",
         "history.compression.every=2",
     ])
-    assert config.history.compression.enabled is False
-    assert config.history.compression.keep_last == 4
+    assert config.history.folds is False
+    assert config.history.keep_last == 4
     assert config.history.compression.every == 2
 
 
@@ -129,9 +130,9 @@ def test_a_typo_in_the_settings_is_refused_at_startup():
 
 def test_settings_survive_the_round_trip_through_a_dictionary():
     config = AgentConfig(history=HistoryConfig(
-        compression=CompressionConfig(keep_last=4, every=3)))
+        keep_last=4, compression=CompressionConfig(every=3)))
     restored = AgentConfig.from_dict(config.to_dict())
-    assert restored.history.compression == config.history.compression
+    assert restored.history == config.history
 
 
 # --------------------------------------------------------------------------
@@ -250,7 +251,7 @@ def test_the_breakdown_shows_the_summary_and_what_it_saves():
     converse(agent, 10)
     breakdown = agent.breakdown()
     assert breakdown.summary > 0
-    assert breakdown.folded_messages == agent.conversation.summarized
+    assert breakdown.held_back == agent.conversation.summarized
     assert breakdown.saved > 0
     assert sum(part.tokens for part in breakdown.parts()) == breakdown.estimated_input
     assert any(part.title == "Пересказ начала" for part in breakdown.parts())

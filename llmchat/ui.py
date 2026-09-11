@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from llmagent import Message
+from llmagent.config import FACTS, FULL, STRATEGIES, STRATEGY_NOTES, SUMMARY, WINDOW
 from llmagent.params import SPECS
 from llmagent.transport import (
     PROVIDER_ORDER,
@@ -464,8 +465,12 @@ def build_header(session: Session) -> RenderableType:
     )
     return Panel(
         grid,
-        title="💬 {} · {}".format(shorten_title(session.label),
-                                   session.agent.session_id),
+        # Имя ветки в шапке появляется только когда веток больше одной: пока
+        # она одна, «основная» ничего не сообщает и только занимает место.
+        title="💬 {} · {}{}".format(
+            shorten_title(session.label),
+            "ветка {} · ".format(session.branch) if session.branched else "",
+            session.agent.session_id),
         title_align="left",
         border_style=session.provider.accent,
         box=box.ROUNDED,
@@ -642,11 +647,23 @@ def _height(console: Console, renderable: RenderableType) -> int:
     return len(console.render_lines(renderable, options, pad=False))
 
 
-def _empty_hint() -> RenderableType:
+EMPTY_HINTS = {
+    FULL: "вся переписка будет отправляться в модель целиком,\nпоэтому она "
+          "помнит контекст разговора.",
+    WINDOW: "в модель будет уходить хвост переписки —\nпоследние {} сообщений.",
+    FACTS: "в модель будут уходить важные сведения разговора\nи последние {} "
+           "сообщений.",
+    SUMMARY: "в модель будут уходить пересказ начала разговора\nи последние {} "
+             "сообщений.",
+}
+
+
+def _empty_hint(session: Session) -> RenderableType:
     hint = Text()
     hint.append("Диалог пуст. ", style="bold")
-    hint.append("Напишите первый вопрос — вся переписка будет отправляться\n"
-                "в модель целиком, поэтому она помнит контекст разговора.", style="dim")
+    hint.append("Напишите первый вопрос — " + EMPTY_HINTS[session.strategy].format(
+        session.keep_last), style="dim")
+    hint.append("\nСпособ выбирается командой /strategy.", style="dim")
     return Panel(hint, box=box.ROUNDED, border_style="grey42", padding=(1, 2))
 
 
@@ -686,7 +703,7 @@ def render_frame(console: Console, session: Session, notice: Optional[Renderable
             )
         )
     if not session.messages:
-        console.print(_empty_hint())
+        console.print(_empty_hint(session))
     for block in blocks:
         console.print(block)
     if notice is not None:
@@ -698,7 +715,7 @@ def render_history(console: Console, session: Session) -> None:
     console.clear()
     console.print(build_header(session))
     if not session.messages:
-        console.print(_empty_hint())
+        console.print(_empty_hint(session))
     for message in session.messages:
         console.print(build_message(message, session))
     console.print(build_stats(session, console.width))
@@ -733,7 +750,7 @@ def tokens_panel(session: Session) -> RenderableType:
     """Ответ на три вопроса: из чего запрос, во что верить, как растёт цена."""
     breakdown = session.breakdown()
     blocks = [_request_table(breakdown), _accuracy_line(breakdown),
-              _compression_line(breakdown, session)]
+              _strategy_line(breakdown, session)]
     steps = session.growth()
     if steps:
         blocks += [Text(), _growth_table(steps)]
@@ -792,29 +809,47 @@ def _accuracy_line(breakdown) -> Text:
     return line
 
 
-def _compression_line(breakdown, session: Session) -> Text:
-    """Что даёт сжатие истории — или почему его пока нет."""
+def _strategy_line(breakdown, session: Session) -> Text:
+    """Что делает с историей выбранная стратегия — и что это даёт."""
     line = Text()
-    line.append("Сжатие истории: ", style="dim")
-    policy = session.compression
-    if not policy.enabled:
-        line.append("выключено, в модель уходит вся переписка", style="yellow")
+    line.append("Стратегия: ", style="dim")
+    line.append(session.strategy)
+    line.append("  ·  {}\n".format(STRATEGY_NOTES.get(session.strategy, "")), style="dim")
+    line.append_text(_strategy_detail(breakdown, session))
+    for note in (session.compression_note, session.facts_note):
+        if note:
+            line.append("\n{}".format(note), style="yellow")
+    return line
+
+
+def _strategy_detail(breakdown, session: Session) -> Text:
+    """Что именно стратегия сделала с историей к этой минуте."""
+    line = Text()
+    if session.strategy == FULL:
+        line.append("В модель уходит вся переписка целиком.", style="dim")
         return line
-    if not breakdown.folded_messages:
-        line.append("включено")
-        line.append("  ·  пересказ появится, когда сверх последних {} сообщений "
-                    "накопится ещё {}".format(policy.keep_last, policy.every),
-                    style="dim")
-    else:
-        line.append("{} {} свёрнуто в пересказ на {}".format(
-            breakdown.folded_messages,
-            plural(breakdown.folded_messages, ("сообщение", "сообщения", "сообщений")),
-            fmt(breakdown.summary)), style="green")
-        line.append("  ·  вместо {}: экономия {} на каждом запросе".format(
-            fmt(breakdown.folded), fmt(breakdown.saved)), style="dim")
-    note = session.compression_note
-    if note:
-        line.append("\nПрошлое сжатие не удалось: {}".format(note), style="yellow")
+    if not breakdown.held_back:
+        line.append("Пока ничего не отложено: вся переписка укладывается "
+                    "в последние {} {}.".format(
+                        session.keep_last,
+                        plural(session.keep_last,
+                               ("сообщение", "сообщения", "сообщений"))), style="dim")
+        if session.strategy == SUMMARY:
+            line.append("\nПересказ появится, когда сверх хвоста накопится "
+                        "ещё {}.".format(session.compression.every), style="dim")
+        return line
+    kept = "" if session.strategy == WINDOW else " на {}".format(
+        fmt(breakdown.summary or breakdown.facts))
+    line.append("{} {} не уходят в модель{}".format(
+        breakdown.held_back,
+        plural(breakdown.held_back, ("сообщение", "сообщения", "сообщений")),
+        {FULL: "", WINDOW: "", SUMMARY: ": вместо них пересказ" + kept,
+         FACTS: ": вместо них факты" + kept}[session.strategy]), style="green")
+    line.append("  ·  вместо {}: экономия {} на каждом запросе".format(
+        fmt(breakdown.held_back_tokens), fmt(breakdown.saved)), style="dim")
+    if session.strategy == FACTS and not session.facts:
+        line.append("\nКартотека пуста: пока она не наполнилась, стратегия "
+                    "работает как скользящее окно.", style="yellow")
     return line
 
 
@@ -883,6 +918,13 @@ COMMANDS: List[tuple] = [
     ("/history", "показать всю переписку целиком"),
     ("/stats", "подробная статистика по токенам"),
     ("/tokens", "из чего сложится следующий запрос и как росла цена диалога"),
+    ("/strategy", "как собирается запрос: full, window, facts, summary; "
+                  "без аргументов — сравнение стратегий"),
+    ("/facts", "картотека важных сведений разговора; её можно поправить руками"),
+    ("/checkpoint", "запомнить место в разговоре, от которого можно отвести ветку"),
+    ("/branch", "отвести ветку от точки возврата и продолжать разговор в ней"),
+    ("/branches", "список веток и точек возврата"),
+    ("/switch", "перейти в другую ветку разговора"),
     ("/summary", "пересказ, которым заменено начало разговора"),
     ("/compress", "свернуть начало разговора в пересказ прямо сейчас"),
     ("/rename", "переименовать сессию — по имени её потом видно в --sessions"),
@@ -905,7 +947,123 @@ COMBINE_HINTS: List[tuple] = [
     ("/change_model 7", "переключиться на модель под номером 7 из списка"),
     ("/change_model gpt-5.5", "то же самое по имени модели"),
     ("/change_model openai gpt-5.5", "если имя есть у нескольких провайдеров"),
+    ("/strategy facts", "перейти на память фактов: в модель уйдут факты и хвост"),
+    ("/facts срок=к 1 марта", "записать факт руками; /facts срок= — забыть его"),
+    ("/checkpoint выбор-стека", "запомнить место; от него потом отводят ветки"),
+    ("/branch вариант-а выбор-стека", "две ветки от одного места: имя и точка"),
 ]
+
+
+def strategy_panel(session: Session, changed: str = "") -> RenderableType:
+    """Стратегии управления контекстом: какая работает и чем отличаются прочие."""
+    table = _help_table(title="Чем стратегии отличаются")
+    table.add_column("Стратегия", style="bold", no_wrap=True)
+    table.add_column("Что уходит в модель")
+    table.add_column("Чем платит")
+    rows = {
+        FULL: "вся переписка целиком",
+        WINDOW: "последние {} сообщений".format(session.keep_last),
+        FACTS: "факты плюс последние {}".format(session.keep_last),
+        SUMMARY: "пересказ начала плюс последние {}".format(session.keep_last),
+    }
+    for name in STRATEGIES:
+        here = name == session.strategy
+        table.add_row(
+            Text("▸ " + name if here else "  " + name,
+                 style="bold magenta" if here else "bold"),
+            Text(rows[name], style="" if here else "dim"),
+            Text(STRATEGY_NOTES[name], style="dim"))
+    head = Text()
+    if changed:
+        head.append("Стратегия теперь {}. ".format(session.strategy), style="green")
+        head.append(changed + "\n", style="dim")
+    head.append("Переключить: ", style="dim")
+    head.append("/strategy " + " | ".join(STRATEGIES))
+    head.append("\nСообщения и переписка при переключении не теряются: "
+                "меняется только то, что уходит в модель.\n", style="dim")
+    return Panel(Group(head, table), title="Стратегия контекста", title_align="left",
+                 border_style="magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def facts_panel(session: Session, changed: Optional[dict] = None) -> RenderableType:
+    """Картотека фактов: что агент считает важным в этом разговоре."""
+    facts = session.facts
+    blocks: List[RenderableType] = []
+    if changed:
+        blocks.append(Text("Обновлено: {}".format(", ".join(
+            "{} → {}".format(key, value or "забыт") for key, value in changed.items())),
+            style="green"))
+    if not facts:
+        blocks.append(Text(
+            "Картотека пуста. Она наполняется сама после каждого вопроса при "
+            "стратегии facts; задать факт руками — /facts ключ=значение.",
+            style="dim"))
+    else:
+        table = _help_table()
+        table.add_column("Ключ", style="bold cyan", no_wrap=True)
+        table.add_column("Значение")
+        sent = session.agent.conversation.sent_facts()
+        for key, value in facts.items():
+            table.add_row(key, Text(value, style="" if key in sent else "dim"))
+        blocks.append(table)
+        if len(sent) < len(facts):
+            blocks.append(Text(
+                "В запрос уходят {} из {}: остальные не влезли в предел "
+                "history.facts.max_tokens = {}. Серым — те, что остались "
+                "в картотеке, но не отправляются.".format(
+                    len(sent), len(facts), session.history.facts.max_tokens),
+                style="yellow"))
+    if session.strategy != FACTS:
+        blocks.append(Text(
+            "Сейчас работает стратегия {}: в модель картотека не уходит. "
+            "Включить — /strategy facts.".format(session.strategy), style="dim"))
+    if session.facts_note:
+        blocks.append(Text(session.facts_note, style="yellow"))
+    blocks.append(Text("/facts ключ=значение — записать · /facts ключ= — забыть · "
+                       "/facts update — обновить у модели · /facts reset — очистить",
+                       style="dim"))
+    return Panel(Group(*blocks), title="Факты разговора", title_align="left",
+                 border_style="cyan", box=box.ROUNDED, padding=(0, 1))
+
+
+def branches_panel(session: Session, note: str = "") -> RenderableType:
+    """Ветки разговора и точки возврата."""
+    branches = session.branches
+    table = _help_table(title="Ветки")
+    table.add_column("№", style="dim", justify="right", no_wrap=True)
+    table.add_column("Ветка", style="bold", no_wrap=True)
+    table.add_column("Откуда", no_wrap=True)
+    table.add_column("Сообщений", justify="right", no_wrap=True)
+    table.add_column("Своих", justify="right", no_wrap=True)
+    for number, branch in enumerate(branches.all(), start=1):
+        here = branch.name == branches.active
+        table.add_row(
+            str(number),
+            Text("▸ " + branch.name if here else "  " + branch.name,
+                 style="bold magenta" if here else "bold"),
+            Text("{} · {}".format(branch.parent, branch.checkpoint)
+                 if branch.parent else "начало разговора", style="dim"),
+            fmt(len(branch.conversation.messages)),
+            fmt(branch.own))
+    blocks: List[RenderableType] = []
+    if note:
+        blocks.append(Text(note, style="green"))
+    blocks.append(table)
+    points = branches.checkpoints()
+    if points:
+        marks = _help_table(title="Точки возврата")
+        marks.add_column("Точка", style="bold cyan", no_wrap=True)
+        marks.add_column("Где поставлена", style="dim")
+        for point in points:
+            marks.add_row(point.label, "{} · {} {}".format(
+                point.branch, point.messages,
+                plural(point.messages, ("сообщение", "сообщения", "сообщений"))))
+        blocks.append(marks)
+    blocks.append(Text(
+        "/checkpoint имя — запомнить место · /branch имя [точка] — отвести ветку · "
+        "/switch имя|номер — перейти", style="dim"))
+    return Panel(Group(*blocks), title="Ветки разговора", title_align="left",
+                 border_style="magenta", box=box.ROUNDED, padding=(0, 1))
 
 
 def help_panel() -> RenderableType:

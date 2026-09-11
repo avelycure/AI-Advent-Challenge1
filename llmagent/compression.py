@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Callable, Dict, List, Sequence
 
-from .history import Conversation, Message
+from .history import Conversation, Message, back_to_question
 
 SUMMARY_SYSTEM = (
     "Ты сжимаешь начало диалога в короткий пересказ, по которому этот диалог "
@@ -57,13 +57,12 @@ CLIPPED = "\n…(сообщение обрезано)"
 def cut_at(conversation: Conversation, keep_last: int, every: int) -> int:
     """Докуда сжимать переписку. Ноль — сжимать пока нечего.
 
-    Граница ставится так, чтобы дословный хвост начинался с вопроса
-    пользователя: ответ без своего вопроса модель прочтёт как ответ неизвестно
-    на что. Поэтому граница только отодвигается назад — хвост бывает длиннее
-    заказанного, но никогда не рвётся посередине обмена.
+    Граница отодвигается назад до вопроса пользователя: тем же способом и по
+    той же причине, по которой её ставит скользящее окно — ответ без своего
+    вопроса модель прочла бы как ответ неизвестно на что.
     """
     edge = len(conversation.messages) - keep_last
-    edge = _back_to_question(conversation.messages, edge, conversation.summarized)
+    edge = back_to_question(conversation.messages, edge, conversation.summarized)
     if edge - conversation.summarized < every:
         return 0
     return edge
@@ -144,14 +143,3 @@ def _clip_to(text: str, budget: int, weigh: Callable[[str], int]) -> str:
         kept = kept[:int(len(kept) * 0.9)]
     return kept + CLIPPED
 
-
-def _back_to_question(messages: Sequence[Message], edge: int, floor: int) -> int:
-    """Отодвинуть границу назад до вопроса пользователя."""
-    edge = max(floor, min(edge, len(messages)))
-    while edge > floor and not _starts_a_question(messages, edge):
-        edge -= 1
-    return edge
-
-
-def _starts_a_question(messages: Sequence[Message], edge: int) -> bool:
-    return edge < len(messages) and messages[edge].role == "user"

@@ -31,6 +31,17 @@ judge: null
 history:
   enabled: true
   keep_last_answer: true
+  window: null         # окно в токенах меньше модельного; null — окно модели
+  on_overflow: stop    # stop | trim | send
+  strategy: summary    # full | window | facts | summary
+  keep_last: 6         # сколько последних сообщений уходит дословно
+  facts:
+    max_facts: 20
+    max_tokens: 300
+    update_every: 1
+  compression:
+    every: 10
+    max_tokens: 400
 budget:
   max_tokens: null
   max_cost: null

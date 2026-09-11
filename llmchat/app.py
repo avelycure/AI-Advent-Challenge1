@@ -33,6 +33,12 @@ from llmagent import (
     overrides,
     restore_agent,
 )
+from llmagent.config import (
+    FACTS as STRATEGY_FACTS,
+    FULL as STRATEGY_FULL,
+    STRATEGIES,
+    SUMMARY as STRATEGY_SUMMARY,
+)
 from llmagent.params import SPECS, GenerationParams, apply, format_value, parse_command
 from llmagent.transport import tokenizer_name
 from llmagent.usage import JUDGE, MAIN, REPAIR, SIDE
@@ -40,7 +46,10 @@ from llmagent.usage import JUDGE, MAIN, REPAIR, SIDE
 from . import subagent, switching
 from .session import DEFAULT_TOPIC, Session
 from .ui import (
+    branches_panel,
     choose_model,
+    facts_panel,
+    strategy_panel,
     format_cost,
     format_seconds,
     session_cost_label,
@@ -121,10 +130,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                       help="потолок трат за сессию")
     tune.add_argument("--no-history", action="store_true",
                       help="отвечать без памяти: каждый вопрос сам по себе")
+    tune.add_argument("--strategy", metavar="ВИД", choices=STRATEGIES,
+                      help="как собирается запрос: {} (по умолчанию {})".format(
+                          ", ".join(STRATEGIES), STRATEGY_SUMMARY))
     tune.add_argument("--no-compress", action="store_true",
-                      help="не сжимать историю: в модель уходит вся переписка целиком")
+                      help="то же, что --strategy full: в модель уходит вся переписка")
     tune.add_argument("--compress", action="store_true",
-                      help="сжимать историю в пересказ (так и работает по умолчанию)")
+                      help="то же, что --strategy summary (так и работает по умолчанию)")
     tune.add_argument("--keep-last", type=int, metavar="ЧИСЛО",
                       help="сколько последних сообщений уходит в модель дословно")
     tune.add_argument("--compress-every", type=int, metavar="ЧИСЛО",
@@ -482,6 +494,29 @@ def chat_loop(console: Console, keys, session: Session,
                 notice = compress_now(console, session)
                 remember()
                 continue
+            if command in ("/strategy", "/strategies"):
+                notice = switch_strategy(session, argument)
+                remember()
+                continue
+            if command in ("/facts", "/fact"):
+                notice = handle_facts(console, session, argument)
+                remember()
+                continue
+            if command in ("/checkpoint", "/point"):
+                notice = mark_checkpoint(session, argument)
+                remember()
+                continue
+            if command == "/branch":
+                notice = make_branch(session, argument)
+                remember()
+                continue
+            if command == "/branches":
+                notice = branches_panel(session)
+                continue
+            if command == "/switch":
+                notice = switch_branch(session, argument)
+                remember()
+                continue
             if command == "/config":
                 notice = config_panel(session)
                 continue
@@ -555,12 +590,9 @@ def chat_loop(console: Console, keys, session: Session,
                 markup=True)
             continue
         if forgotten:
-            # Молча забыть начало разговора нельзя: следующий ответ модели
-            # будет выглядеть беспамятным, и человек не поймёт, почему.
-            console.print(warning_panel(
-                "Контекст переполнился, и начало разговора забыто: {} {} больше "
-                "не уходят в модель. Отвечать она будет только по остатку.".format(
-                    forgotten, plural(forgotten, ("сообщение", "сообщения", "сообщений")))))
+            # Молча сократить отправляемое нельзя: следующий ответ модели будет
+            # выглядеть беспамятным, и человек не поймёт, почему.
+            console.print(warning_panel(overflow_notice(session, forgotten)))
         elif session.agent.sends_anyway and not session.agent.breakdown().fits:
             # Запрос заведомо не влезает, но отправляется намеренно: человек
             # попросил показать не нашу проверку, а ответ провайдера.
@@ -628,7 +660,7 @@ def summary_panel(session: Session, folded: int = 0) -> RenderableType:
         head.append("Свёрнуто сообщений: {}\n".format(folded), style="green")
     head.append("В модель вместо {} сообщений начала уходит пересказ на {} "
                 "{} — на {} {} меньше в каждом запросе.\n".format(
-                    breakdown.folded_messages, fmt(breakdown.summary),
+                    breakdown.held_back, fmt(breakdown.summary),
                     plural(breakdown.summary, ("токен", "токена", "токенов")),
                     fmt(breakdown.saved),
                     plural(breakdown.saved, ("токен", "токена", "токенов"))),
@@ -641,18 +673,155 @@ def summary_panel(session: Session, folded: int = 0) -> RenderableType:
 def waiting_for_summary(session: Session) -> str:
     """Почему пересказа ещё нет и когда он появится."""
     policy = session.compression
-    if not policy.enabled:
-        return ("Сжатие выключено: в модель уходит вся переписка целиком.\n"
-                "[dim]Включить можно при запуске:[/] [cyan]--compress[/]")
+    if session.strategy != STRATEGY_SUMMARY:
+        return ("Сейчас работает стратегия [bold]{}[/]: пересказ при ней не "
+                "пишется.\n[dim]Перейти на пересказ:[/] [cyan]/strategy summary[/]"
+                .format(session.strategy))
     if session.compression_note:
         return ("Прошлое сжатие не удалось: {}\n"
                 "[dim]В модель пока уходит вся переписка. Попробовать ещё раз:[/] "
                 "[cyan]/compress[/]".format(escape(session.compression_note)))
-    left = policy.every - max(0, len(session.messages) - policy.keep_last)
+    left = policy.every - max(0, len(session.messages) - session.keep_last)
     return ("Начало разговора свернётся в пересказ, когда сверх последних {} "
             "сообщений накопится ещё {}: осталось {}.\n"
             "[dim]Не дожидаться:[/] [cyan]/compress[/]".format(
-                policy.keep_last, policy.every, max(1, left)))
+                session.keep_last, policy.every, max(1, left)))
+
+
+# --------------------------------------------------------------------------
+# Стратегия контекста, факты и ветки
+# --------------------------------------------------------------------------
+
+def overflow_notice(session: Session, forgotten: int) -> str:
+    """Что именно случилось с перепиской, когда она перестала помещаться.
+
+    При скользящем окне и фактах сообщения остаются на месте — сужается окно;
+    при полной истории и пересказе начало выбрасывается насовсем. Написать
+    одно вместо другого значило бы соврать в обе стороны сразу.
+    """
+    count = "{} {}".format(forgotten, plural(
+        forgotten, ("сообщение", "сообщения", "сообщений")))
+    if session.history.slides:
+        return ("Контекст переполнился, и окно сузилось на {}: в модель уходит "
+                "более короткий хвост переписки. Сама переписка цела — "
+                "смотрите /history.".format(count))
+    return ("Контекст переполнился, и начало разговора забыто: {} больше "
+            "не уходят в модель. Отвечать она будет только по остатку."
+            .format(count))
+
+
+def switch_strategy(session: Session, argument: str) -> RenderableType:
+    """Переключить стратегию управления контекстом или показать список."""
+    wanted = " ".join(argument.split()).lower()
+    if not wanted:
+        return strategy_panel(session)
+    if wanted not in STRATEGIES:
+        return error_panel("Нет стратегии «{}». Есть: {}.".format(
+            escape(wanted), ", ".join(STRATEGIES)))
+    if wanted == session.strategy:
+        return strategy_panel(session, changed="Она и так уже работала.")
+    was = session.strategy
+    session.agent.reconfigure(history=session.history.with_strategy(wanted))
+    return strategy_panel(session, changed=switch_note(session, was))
+
+
+def switch_note(session: Session, was: str) -> str:
+    """Что изменится в следующем запросе после смены стратегии."""
+    kept = []
+    if session.summary:
+        kept.append("пересказ начала сохранён")
+    if session.facts:
+        kept.append("картотека из {} {} сохранена".format(
+            len(session.facts), plural(len(session.facts),
+                                       ("факта", "фактов", "фактов"))))
+    saved = "; ".join(kept) + ". " if kept else ""
+    if session.strategy == STRATEGY_FACTS and not session.facts:
+        return (saved + "Картотека пока пуста: она наполнится после следующего "
+                "вопроса, а до того запрос собирается как при window.")
+    if session.strategy == STRATEGY_SUMMARY and not session.summary:
+        return saved + "Пересказ появится, когда накопится порог сжатия."
+    if session.strategy == STRATEGY_FULL:
+        return saved + "Со следующего вопроса в модель снова уходит вся переписка."
+    return saved + "Была {}.".format(was)
+
+
+def handle_facts(console: Console, session: Session, argument: str) -> RenderableType:
+    """Картотека фактов: показать, поправить руками, обновить или очистить."""
+    wanted = argument.strip()
+    if not wanted:
+        return facts_panel(session)
+    if wanted.lower() == "reset":
+        session.agent.conversation.forget_facts()
+        return facts_panel(session)
+    if wanted.lower() == "update":
+        console.print("[dim]Разбираю разговор на факты…[/]")
+        try:
+            changed = session.agent.update_facts()
+        except (AgentError, LLMError, ValueError) as exc:
+            return error_panel("Картотека не обновлена: {}".format(escape(str(exc))))
+        if not changed:
+            return facts_panel(session)
+        return facts_panel(session, changed=changed)
+    if "=" not in wanted:
+        return error_panel(
+            "Нужно [cyan]/facts ключ=значение[/], [cyan]/facts ключ=[/] чтобы "
+            "забыть, либо [cyan]/facts update[/] и [cyan]/facts reset[/].",
+            markup=True)
+    key, _, value = wanted.partition("=")
+    changed = session.agent.remember_fact(key, value)
+    if not changed:
+        return facts_panel(session)
+    return facts_panel(session, changed=changed)
+
+
+def mark_checkpoint(session: Session, argument: str) -> RenderableType:
+    """Запомнить место разговора, от которого потом отводят ветки."""
+    if not session.messages:
+        return warning_panel("Запоминать нечего: разговор ещё не начался.")
+    try:
+        point = session.agent.mark_checkpoint(argument)
+    except AgentError as exc:
+        return error_panel(escape(str(exc)))
+    return branches_panel(session, note=(
+        "Точка «{}» поставлена: {} {} разговора. Отвести от неё ветку — "
+        "/branch имя {}.".format(
+            point.label, point.messages,
+            plural(point.messages, ("сообщение", "сообщения", "сообщений")),
+            point.label)))
+
+
+def make_branch(session: Session, argument: str) -> RenderableType:
+    """Отвести ветку от точки возврата и продолжать разговор в ней."""
+    name, _, label = argument.strip().partition(" ")
+    if not name:
+        return error_panel(
+            "У ветки должно быть имя: [cyan]/branch вариант-а[/] или "
+            "[cyan]/branch вариант-б выбор-стека[/] — от названной точки.",
+            markup=True)
+    try:
+        branch = session.agent.fork(name, label.strip())
+    except AgentError as exc:
+        return error_panel(escape(str(exc)))
+    return branches_panel(session, note=(
+        "Ветка «{}» отведена от точки «{}»: унаследовано {} {}. Всё сказанное "
+        "дальше остаётся в ней и в соседние ветки не попадёт.".format(
+            branch.name, branch.checkpoint, branch.inherited,
+            plural(branch.inherited, ("сообщение", "сообщения", "сообщений")))))
+
+
+def switch_branch(session: Session, argument: str) -> RenderableType:
+    """Перейти в другую ветку разговора."""
+    if not argument.strip():
+        return branches_panel(session)
+    try:
+        branch = session.agent.switch_branch(argument)
+    except AgentError as exc:
+        return error_panel(escape(str(exc)))
+    return branches_panel(session, note=(
+        "Разговор продолжается в ветке «{}»: {} {}, из них своих {}.".format(
+            branch.name, len(branch.conversation.messages),
+            plural(len(branch.conversation.messages),
+                   ("сообщение", "сообщения", "сообщений")), branch.own)))
 
 
 def rename_session(session: Session, argument: str) -> RenderableType:
@@ -787,8 +956,9 @@ FLAG_FIELDS = (
     ("format", "output.format"),
     ("max_cost", "budget.max_cost"),
     ("agent_name", "name"),
-    ("keep_last", "history.compression.keep_last"),
+    ("keep_last", "history.keep_last"),
     ("compress_every", "history.compression.every"),
+    ("strategy", "history.strategy"),
 )
 
 
@@ -833,12 +1003,16 @@ def named_pairs(args: argparse.Namespace) -> List[tuple]:
             pairs.append((path, value))
     if args.no_history:
         pairs.append(("history.enabled", False))
-    # Сжатие включено по умолчанию, поэтому --compress нужен ровно затем, чтобы
-    # перебить --no-compress из сохранённого запуска или из конфига.
+    # Прежние имена того же выбора. Они старше стратегий и остались затем, что
+    # ими набраны все прежние запуски и показы дня 9.
     if args.no_compress:
-        pairs.append(("history.compression.enabled", False))
+        pairs.append(("history.strategy", STRATEGY_FULL))
     if args.compress:
-        pairs.append(("history.compression.enabled", True))
+        pairs.append(("history.strategy", STRATEGY_SUMMARY))
+    # Явная стратегия идёт последней: она называет то же поле прямо, а
+    # последняя правка на поле побеждает.
+    if args.strategy:
+        pairs.append(("history.strategy", args.strategy))
     return pairs
 
 

@@ -162,6 +162,54 @@ MIN_WINDOW = 256
 # Что делать с диалогом, который перестал помещаться в окно.
 OVERFLOW_POLICIES = ("stop", "trim", "send")
 
+# Как собирается запрос из накопившейся переписки.
+#
+# "full"    — вся переписка целиком;
+# "window"  — только последние keep_last сообщений, остальное не отправляется;
+# "facts"   — блок фактов плюс последние keep_last сообщений;
+# "summary" — пересказ начала плюс последние keep_last сообщений.
+FULL = "full"
+WINDOW = "window"
+FACTS = "facts"
+SUMMARY = "summary"
+STRATEGIES = (FULL, WINDOW, FACTS, SUMMARY)
+
+# Чем стратегия платит за экономию — одной строкой на каждую, для справки
+# и для панели переключателя. Держится здесь, а не в интерфейсе: описание
+# стратегии принадлежит стратегии, а не экрану, на котором её показали.
+STRATEGY_NOTES = {
+    FULL: "дороже всех и раньше всех упрётся в окно",
+    WINDOW: "не стоит ничего, но начало разговора забыто начисто",
+    FACTS: "короткий служебный запрос на каждый вопрос",
+    SUMMARY: "служебный запрос на каждые несколько сообщений",
+}
+
+
+@dataclass(frozen=True)
+class FactsConfig:
+    """Память фактов: ключ-значение вместо прозы пересказа.
+
+    Смысл — в устойчивости. Пересказ пишется словами, и факт в нём теряется
+    незаметно: второй пересказ пишется по первому, и «бюджет 300 тысяч»
+    превращается в «обсуждали бюджет». Факт с ключом так не теряется — он
+    либо есть, либо его нет, и его видно глазом в ``/facts``.
+    """
+
+    max_facts: int = 20
+    max_tokens: int = 300
+    # После скольких вопросов пользователя обновлять факты. Единица — после
+    # каждого: так поставлено задание. Больше — дешевле, но факт из последнего
+    # вопроса попадёт в память только к следующему.
+    update_every: int = 1
+
+    def __post_init__(self) -> None:
+        if self.max_facts < 1:
+            raise ConfigError("history.facts.max_facts: минимум 1")
+        if self.max_tokens < 1:
+            raise ConfigError("history.facts.max_tokens: минимум 1")
+        if self.update_every < 1:
+            raise ConfigError("history.facts.update_every: минимум 1")
+
 
 @dataclass(frozen=True)
 class CompressionConfig:
@@ -174,20 +222,12 @@ class CompressionConfig:
     и договорённости остаются в пересказе, а не пропадают, как при обрезке.
     """
 
-    enabled: bool = True
-    # Сколько последних сообщений уходит в модель дословно. Меньше двух
-    # бессмысленно: в паре «вопрос — ответ» уже два сообщения, и сжимать
-    # разговор до одной реплики значит отдать модели её же ответ без вопроса.
-    keep_last: int = 6
-    # Сколько несжатых сообщений должно накопиться сверх этого хвоста, чтобы
-    # был смысл платить за отдельный запрос к модели.
+    # Сколько несжатых сообщений должно накопиться сверх дословного хвоста,
+    # чтобы был смысл платить за отдельный запрос к модели.
     every: int = 10
     max_tokens: int = 400
 
     def __post_init__(self) -> None:
-        if self.keep_last < 2:
-            raise ConfigError("history.compression.keep_last: минимум 2 — иначе "
-                              "в запрос уйдёт ответ без своего вопроса")
         if self.every < 1:
             raise ConfigError("history.compression.every: минимум 1")
         if self.max_tokens < 1:
@@ -207,16 +247,55 @@ class HistoryConfig:
     # "trim" — забыть начало разговора и продолжить, "send" — отправить как
     # есть и показать, что на это скажет провайдер.
     on_overflow: str = "stop"
-    # Сжатие старого начала разговора в пересказ.
+    # Как собирается запрос: full, window, facts или summary.
+    strategy: str = SUMMARY
+    # Сколько последних сообщений уходит в модель дословно. Одно число на три
+    # стратегии: «последние N» у окна, у фактов и у пересказа означает одно и
+    # то же, и двумя полями это отличалось бы только способом ошибиться.
+    #
+    # Меньше двух бессмысленно: в паре «вопрос — ответ» уже два сообщения, и
+    # сузить хвост до одной реплики значит отдать модели её же ответ без вопроса.
+    keep_last: int = 6
+    # Память фактов — для стратегии facts.
+    facts: FactsConfig = field(default_factory=FactsConfig)
+    # Сжатие старого начала разговора в пересказ — для стратегии summary.
     compression: CompressionConfig = field(default_factory=CompressionConfig)
 
     def __post_init__(self) -> None:
         if self.on_overflow not in OVERFLOW_POLICIES:
             raise ConfigError("history.on_overflow: допустимо {}, а не «{}»".format(
                 ", ".join(OVERFLOW_POLICIES), self.on_overflow))
+        if self.strategy not in STRATEGIES:
+            raise ConfigError("history.strategy: допустимо {}, а не «{}»".format(
+                ", ".join(STRATEGIES), self.strategy))
+        if self.keep_last < 2:
+            raise ConfigError("history.keep_last: минимум 2 — иначе в запрос "
+                              "уйдёт ответ без своего вопроса")
         if self.window is not None and self.window < MIN_WINDOW:
             raise ConfigError("history.window: окно меньше {} токенов ни на что "
                               "не годится, задано {}".format(MIN_WINDOW, self.window))
+
+    @property
+    def folds(self) -> bool:
+        """Пересказывается ли начало разговора при этой стратегии."""
+        return self.strategy == SUMMARY
+
+    @property
+    def collects_facts(self) -> bool:
+        return self.strategy == FACTS
+
+    def with_strategy(self, name: str) -> "HistoryConfig":
+        """Тот же раздел с другой стратегией — конфиг заморожен."""
+        return replace(self, strategy=name)
+
+    @property
+    def slides(self) -> bool:
+        """Скользит ли окно сообщений — то есть отсчитывается ли от конца.
+
+        Отличие важно при переполнении: скользящее окно сужают, а полную
+        историю и пересказ можно только обрезать.
+        """
+        return self.strategy in (WINDOW, FACTS)
 
 
 @dataclass(frozen=True)
@@ -381,6 +460,8 @@ def _from_plain(target: type, payload: Any) -> Any:
     if not isinstance(payload, dict):
         raise ConfigError("ожидался объект для {}, получено {}".format(
             target.__name__, type(payload).__name__))
+    if target is HistoryConfig:
+        payload = _history_from_day9(payload)
 
     known = {f.name: f for f in fields(target)}
     unknown = set(payload) - set(known)
@@ -396,6 +477,29 @@ def _from_plain(target: type, payload: Any) -> Any:
     return target(**kwargs)
 
 
+def _history_from_day9(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Перевести раздел истории из прежнего вида в нынешний.
+
+    До появления стратегий сжатие включалось своим признаком, а длина
+    дословного хвоста принадлежала ему же. Теперь способ работы с контекстом
+    один на всех и называется стратегией, а хвост общий для трёх стратегий.
+    Прежние конфиги и сохранённые сессии от этого читаться не перестали:
+    ``compression.enabled: false`` — это стратегия ``full``, а
+    ``compression.keep_last`` — нынешний ``history.keep_last``.
+    """
+    legacy = payload.get("compression")
+    if not isinstance(legacy, dict) or not ({"enabled", "keep_last"} & set(legacy)):
+        return payload
+    moved = dict(payload)
+    compression = {k: v for k, v in legacy.items() if k not in ("enabled", "keep_last")}
+    moved["compression"] = compression
+    if "keep_last" in legacy and "keep_last" not in payload:
+        moved["keep_last"] = legacy["keep_last"]
+    if "strategy" not in payload:
+        moved["strategy"] = SUMMARY if legacy.get("enabled", True) else FULL
+    return moved
+
+
 # Поля, у которых из аннотации тип не вытащить простым способом: аннотации
 # в модуле строковые (from __future__ import annotations), а разбирать их
 # на лету дороже и хрупче, чем назвать восстановление явно.
@@ -406,6 +510,7 @@ _NESTED: Dict[str, Any] = {
     "judge": JudgeConfig,
     "tools": ToolPolicy,
     "history": HistoryConfig,
+    "facts": FactsConfig,
     "compression": CompressionConfig,
     "budget": Budget,
     "transport": Transport,

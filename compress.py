@@ -178,12 +178,12 @@ class Run:
 # Три способа вести один и тот же разговор.
 WAYS = (
     ("Вся история", "переписка уходит в модель целиком",
-     dict(on_overflow="stop", compression=CompressionConfig(enabled=False))),
+     dict(on_overflow="stop", strategy="full")),
     ("Обрезка", "старое выбрасывается, чтобы влезть",
-     dict(on_overflow="trim", compression=CompressionConfig(enabled=False))),
+     dict(on_overflow="trim", strategy="full")),
     ("Сжатие", "начало заменяется пересказом",
-     dict(on_overflow="trim", compression=CompressionConfig(
-         enabled=True, keep_last=KEEP_LAST, every=EVERY))),
+     dict(on_overflow="trim", strategy="summary", keep_last=KEEP_LAST,
+          compression=CompressionConfig(every=EVERY))),
 )
 
 

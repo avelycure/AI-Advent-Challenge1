@@ -25,8 +25,9 @@ SIDE = "служебный"
 SUB = "под-агент"
 TOOL = "инструмент"
 SUMMARY = "сжатие"
+FACTS = "факты"
 
-KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB, TOOL, SUMMARY)
+KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB, TOOL, SUMMARY, FACTS)
 
 
 @dataclass

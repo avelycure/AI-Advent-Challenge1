@@ -14,8 +14,10 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from . import compression
+from . import facts as recording
 from . import judge as judging
 from . import policies
+from .branches import Branch, Branches, Checkpoint
 from .breakdown import RequestBreakdown, Step, growth, request_breakdown
 from .config import DEFAULT_CONFIG, AgentConfig
 from .errors import (
@@ -36,11 +38,25 @@ from .transport import (
     count_text_tokens,
     request_cost,
 )
-from .usage import JUDGE, MAIN, REPAIR, SIDE, SUB, SUMMARY, TOOL, UsageMeter
+from .usage import FACTS, JUDGE, MAIN, REPAIR, SIDE, SUB, SUMMARY, TOOL, UsageMeter
 
 # Пересказ — работа не творческая: одни и те же сообщения должны сворачиваться
 # в одно и то же, поэтому разброс здесь ни к чему.
 SUMMARY_TEMPERATURE = 0.2
+
+# Картотека фактов — тем более не творческая: от неё нужен разбор, а не
+# сочинение, и разброс превращал бы один и тот же разговор в разные ключи.
+FACTS_TEMPERATURE = 0.0
+
+# Сколько места отвести ответу с фактами. Картотека короткая, но предел ей
+# нужен свой: с общим ``max_tokens`` короткий ответ обрывал бы JSON на
+# середине, а длинный оплачивал бы место, которое картотеке ни к чему.
+FACTS_MAX_TOKENS = 500
+
+# Насколько далеко отодвигается следующая попытка разобрать картотеку после
+# неудач подряд. Предел нужен, чтобы после долгого разговора с недоступным
+# провайдером картотека не замолчала навсегда.
+MAX_FACTS_PAUSE = 16
 
 
 class Agent:
@@ -62,13 +78,23 @@ class Agent:
         # с памятью другого, и по идентификатору их видно на экране и в отчёте.
         self.session_id = session_id or uuid.uuid4().hex[:8]
         self.usage = UsageMeter()
-        self.conversation = Conversation(keep_last_answer=config.history.keep_last_answer)
+        # Ветки разговора. Их всегда хотя бы одна, и пока она одна, ветвление
+        # ничем себя не проявляет: ``conversation`` — переписка активной ветки.
+        self.branches = Branches()
+        self._sync_context()
         # Почему сжатие не состоялось в последний раз. Пустая строка — состоялось
         # или не требовалось. Держится здесь, а не поднимается наверх ошибкой:
         # неудача пересказа не повод не ответить на вопрос.
         self.compression_note = ""
+        # То же про картотеку фактов: модель могла ответить не тем, и это
+        # причина показать заметку, а не причина не отвечать на вопрос.
+        self.facts_note = ""
         # С какой длины переписки пробовать сжатие снова после неудачи.
         self._retry_fold_at = 0
+        # То же про картотеку и сколько неудач подряд уже случилось: по ним
+        # растёт пауза перед следующей попыткой.
+        self._retry_facts_at = 0
+        self._facts_failures = 0
         self._judge_agent: Optional["Agent"] = None
         # Что инструменты делают — приносит вызывающий, какие включены —
         # говорит конфиг. Несовпадение выясняется сразу, а не на первом ответе.
@@ -77,6 +103,61 @@ class Agent:
         # включить прямо в разговоре, и отбирать тогда было бы уже не из чего.
         self._all_tools = toolbox or Toolbox()
         self._toolbox = self._all_tools.only(config.tools.enabled)
+
+    # --- переписка и ветки ------------------------------------------------
+    @property
+    def conversation(self) -> Conversation:
+        """Переписка активной ветки. Пока ветка одна — просто переписка."""
+        return self.branches.conversation
+
+    @conversation.setter
+    def conversation(self, value: Conversation) -> None:
+        self.branches.conversation = value
+        self._sync_context()
+
+    def _sync_context(self) -> None:
+        """Раздать переписке настройки, по которым она собирает запрос.
+
+        Раздать всем сразу, а не только активной: ветку переключают и от точки
+        возврата отводят новую, и получить при этом переписку, собранную по
+        прежней стратегии, было бы неожиданностью на пустом месте.
+        """
+        history = self._config.history
+        for conversation in self.branches.each_conversation():
+            conversation.keep_last_answer = history.keep_last_answer
+            conversation.strategy = history.strategy
+            conversation.keep_last = history.keep_last
+            conversation.facts_limit = history.facts.max_tokens
+
+    def mark_checkpoint(self, label: str = "") -> Checkpoint:
+        """Запомнить место разговора, от которого можно отвести ветку."""
+        return self.branches.mark(label)
+
+    def fork(self, name: str, checkpoint: str = "") -> Branch:
+        """Отвести ветку от точки возврата и продолжать разговор в ней."""
+        branch = self.branches.fork(name, checkpoint)
+        self._switched()
+        return branch
+
+    def switch_branch(self, wanted: str) -> Branch:
+        branch = self.branches.switch(wanted)
+        self._switched()
+        return branch
+
+    def _switched(self) -> None:
+        """Привести агента в порядок после перехода в другую ветку.
+
+        Заметки о неудачах и отсрочки повторов описывают ту переписку, из
+        которой мы ушли. В новой ветке их длина другая, и отсрочка «повторить,
+        когда наберётся столько-то сообщений» указывала бы мимо: она либо
+        молчала бы там, где надо разобрать, либо сработала бы сразу.
+        """
+        self._sync_context()
+        self.compression_note = ""
+        self.facts_note = ""
+        self._retry_fold_at = 0
+        self._retry_facts_at = 0
+        self._facts_failures = 0
 
     # --- конфиг ---------------------------------------------------------
     @property
@@ -105,11 +186,13 @@ class Agent:
             self._config.api_key, self._config.api_extra, self._config.transport)
 
         self._config = updated
-        self.conversation.keep_last_answer = updated.history.keep_last_answer
+        self._sync_context()
         if provider_changed:
             # Точный размер контекста измерен токенизатором прежней модели
             # и после смены неверен: история снова оценивается локально.
-            self.conversation.forget_model()
+            # Во всех ветках: чужой токенизатор не описывает ни одну из них.
+            for conversation in self.branches.each_conversation():
+                conversation.forget_model()
         if provider_changed or credentials_changed:
             self._client = None
             self._credentials = None
@@ -254,10 +337,11 @@ class Agent:
         не поможет: сжимать нечего или пересказ выйдет не короче того, что он
         заменит, — а платить за запрос, который не освободит места, незачем.
         """
-        policy = self._config.history.compression
-        if not policy.enabled:
+        history = self._config.history
+        policy = history.compression
+        if not history.folds:
             return 0
-        cut = compression.cut_at(self.conversation, policy.keep_last, 1)
+        cut = compression.cut_at(self.conversation, history.keep_last, 1)
         if cut <= self.conversation.summarized:
             return 0
         block = self.conversation.messages[self.conversation.summarized:cut]
@@ -272,8 +356,9 @@ class Agent:
         условие разговора. Если модель его не написала, в запрос уйдёт вся
         история, как уходила раньше, а причина останется в ``compression_note``.
         """
-        policy = self._config.history.compression
-        if not policy.enabled or len(self.conversation.messages) < self._retry_fold_at:
+        history = self._config.history
+        policy = history.compression
+        if not history.folds or len(self.conversation.messages) < self._retry_fold_at:
             return 0
         try:
             return self.compress_history(force=force)
@@ -293,9 +378,9 @@ class Agent:
         нечего. Ошибку запроса поднимает наверх — в отличие от ``fold_history``:
         сжатия здесь просят намеренно, и промолчать о неудаче было бы обманом.
         """
-        policy = self._config.history.compression
-        cut = compression.cut_at(self.conversation, policy.keep_last,
-                                 1 if force else policy.every)
+        history = self._config.history
+        cut = compression.cut_at(self.conversation, history.keep_last,
+                                 1 if force else history.compression.every)
         if cut <= self.conversation.summarized:
             return 0
         block = self.conversation.messages[self.conversation.summarized:cut]
@@ -355,11 +440,105 @@ class Agent:
             compression.build_request("", [], policy.max_tokens))
         return max(1, self.context_limit - policy.max_tokens * 2 - frame)
 
+    # --- картотека фактов -------------------------------------------------
+    def collect_facts(self, force: bool = False) -> Dict[str, str]:
+        """Обновить картотеку по новым сообщениям. Возвращает изменившееся.
+
+        Неудача не срывает ответ, как и неудача пересказа: картотека — способ
+        помнить дольше, а не условие разговора. Если модель ответила не тем,
+        в запрос уйдёт прежняя картотека, а причина останется в ``facts_note``.
+        """
+        if not force and not self._config.history.collects_facts:
+            return {}
+        try:
+            changed = self.update_facts()
+        except (AgentError, LLMError, ValueError) as exc:
+            self.facts_note = str(exc)
+            # Неудачный разбор — это оплаченный запрос. Модель, которая вместо
+            # JSON пишет прозу, пишет её и на следующем вопросе, и на
+            # десятом, — поэтому после каждой неудачи подряд пауза удваивается.
+            # Без паузы такой разговор платил бы за картотеку дважды и не
+            # получал бы её ни разу.
+            self._facts_failures += 1
+            self._retry_facts_at = (len(self.conversation.messages)
+                                    + min(MAX_FACTS_PAUSE, 2 ** self._facts_failures))
+            return {}
+        self._facts_failures = 0
+        self._retry_facts_at = 0
+        return changed
+
+    def update_facts(self) -> Dict[str, str]:
+        """Спросить у модели, что в новых сообщениях стоит запомнить.
+
+        Ошибку поднимает наверх — в отличие от ``collect_facts``: обновления
+        здесь просят намеренно, и промолчать о неудаче было бы обманом.
+
+        В модель уходит нынешняя картотека и только те сообщения, которых она
+        ещё не видела. Весь разговор заново не отправляется: картотека затем и
+        нужна, чтобы за память не платить дважды.
+        """
+        conversation = self.conversation
+        block = conversation.messages[conversation.facts_seen:]
+        if not block:
+            return {}
+        policy = self._config.history.facts
+        current = conversation.sent_facts()
+        block = recording.fitting(block, self._facts_budget(current), count_text_tokens)
+        completion = self._call(
+            recording.build_request(current, block),
+            kind=FACTS, max_tokens=FACTS_MAX_TOKENS,
+            temperature=FACTS_TEMPERATURE, stop=[], response_format={})
+        update = recording.parse(completion.text)
+        changed = conversation.absorb_facts(update, len(conversation.messages),
+                                            policy.max_facts)
+        self.facts_note = ""
+        return changed
+
+    def _facts_budget(self, current: Dict[str, str]) -> int:
+        """Сколько токенов отведено под разбираемые сообщения.
+
+        Из окна вычитается всё, что займёт запрос помимо них: место под ответ
+        с картотекой, нынешняя картотека как материал и сама просьба.
+
+        Итог делится на поправку к токенизатору, потому что сами сообщения
+        взвешиваются потом без неё. Забыть про это деление значило бы каждый
+        раз промахиваться ровно на величину поправки — и упираться в заставу
+        перед отправкой запросом, который по своим же расчётам помещался.
+        """
+        frame = self.conversation.weigh(recording.build_request(current, []))
+        room = self.context_limit - FACTS_MAX_TOKENS - frame
+        return max(1, int(room / max(0.1, self.conversation.scale)))
+
+    def remember_fact(self, key: str, value: str) -> Dict[str, str]:
+        """Записать факт руками. Пустое значение забывает факт."""
+        conversation = self.conversation
+        return conversation.absorb_facts(
+            {key: value}, conversation.facts_seen,
+            self._config.history.facts.max_facts)
+
+    def _facts_due(self) -> bool:
+        """Пора ли обновлять картотеку.
+
+        Считаются вопросы пользователя, а не сообщения: задание говорит
+        «после каждого сообщения пользователя», и ответы модели к этому счёту
+        отношения не имеют.
+        """
+        conversation = self.conversation
+        if len(conversation.messages) < self._retry_facts_at:
+            return False
+        asked = sum(1 for message in conversation.messages[conversation.facts_seen:]
+                    if message.role == "user")
+        return asked >= self._config.history.facts.update_every
+
     def reset(self) -> None:
         """Забыть диалог. Счётчики расхода остаются: деньги уже потрачены."""
-        self.conversation.reset()
+        self.branches.reset()
+        self._sync_context()
         self.compression_note = ""
+        self.facts_note = ""
         self._retry_fold_at = 0
+        self._retry_facts_at = 0
+        self._facts_failures = 0
 
     def new_session(self) -> str:
         """Начать новую сессию: чистая память, новый счёт и новый идентификатор.
@@ -373,10 +552,14 @@ class Agent:
         бы дважды показать одни и те же траты, а заодно съесть чужим расходом
         лимит из ``budget``.
         """
-        self.conversation.reset()
+        self.branches.reset()
+        self._sync_context()
         self.usage = UsageMeter()
         self.compression_note = ""
+        self.facts_note = ""
         self._retry_fold_at = 0
+        self._retry_facts_at = 0
+        self._facts_failures = 0
         self.session_id = uuid.uuid4().hex[:8]
         return self.session_id
 
@@ -417,6 +600,11 @@ class Agent:
         # место, и проверять окно раньше него значило бы отказывать разговору,
         # который на самом деле помещается.
         self.fold_history()
+        # Картотеку обновляем тоже до ответа: факт, названный в этом самом
+        # вопросе, должен попасть в память до того, как модель на него
+        # ответит, — иначе стратегия отстаёт от разговора на один шаг.
+        if self._config.history.collects_facts and self._facts_due():
+            self.collect_facts()
         # Умещаем диалог до сборки сообщений: обрезать историю после того, как
         # запрос собран, — значит отправить в модель прежний, длинный.
         self.fit_context()
@@ -463,12 +651,24 @@ class Agent:
         """
         forgotten = 0
         while not breakdown.fits:
-            pair = self.conversation.drop_oldest_exchange()
+            pair = self._free_one_exchange()
             if not pair:
                 raise ContextOverflow(_overflow_reason(breakdown, trimmed=forgotten))
             forgotten += pair
             breakdown = self.breakdown()
         return forgotten
+
+    def _free_one_exchange(self) -> int:
+        """Освободить место на один обмен способом, который подходит стратегии.
+
+        При скользящем окне и при фактах окно сужается: сообщения остаются на
+        месте, просто уходит их меньше. При полной истории и при пересказе
+        освободить место можно только выбросив самый старый обмен — в запрос
+        уходит вся оставшаяся переписка, и сузить тут нечего.
+        """
+        if self._config.history.slides:
+            return self.conversation.narrow_window()
+        return self.conversation.drop_oldest_exchange()
 
     def _system_prompt(self) -> str:
         return policies.output_system_prompt(self._config.output,

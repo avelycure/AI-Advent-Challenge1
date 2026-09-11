@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .branches import Branches
 from .config import AgentConfig
 from .errors import AgentError
 from .history import Conversation
@@ -61,6 +62,9 @@ class SessionRecord:
     updated_at: float = 0.0
     config: Dict[str, Any] = field(default_factory=dict)
     conversation: Dict[str, Any] = field(default_factory=dict)
+    # Ветки разговора и точки возврата. Пусто в файлах, записанных до их
+    # появления: тогда ветка ровно одна — та самая переписка.
+    branches: Dict[str, Any] = field(default_factory=dict)
     usage: Dict[str, Any] = field(default_factory=dict)
     path: Optional[str] = None
     # Место в полном списке. Именно оно показывается человеку и принимается
@@ -177,6 +181,7 @@ class SessionStore:
             "updated_at": stamp,
             "config": _config_without_secrets(agent.config),
             "conversation": agent.conversation.to_dict(),
+            "branches": agent.branches.to_dict(),
             "usage": agent.usage.to_dict(),
         }
 
@@ -321,6 +326,7 @@ class SessionStore:
             updated_at=float(payload.get("updated_at") or 0.0),
             config=dict(payload.get("config") or {}),
             conversation=dict(payload.get("conversation") or {}),
+            branches=dict(payload.get("branches") or {}),
             usage=dict(payload.get("usage") or {}),
             path=str(path),
         )
@@ -377,14 +383,18 @@ def restore_agent(record: SessionRecord, config: AgentConfig, **kwargs):
 
     agent = Agent(config, session_id=record.session_id, **kwargs)
     if record.conversation:
-        agent.conversation = Conversation.restore(record.conversation)
-        agent.conversation.keep_last_answer = config.history.keep_last_answer
+        conversation = Conversation.restore(record.conversation)
         stored = record.config
         if (stored.get("provider"), stored.get("model")) != (config.provider, config.model):
             # Точный размер контекста измерен токенизатором прежней модели.
             # После смены он неверен, и полоса заполнения вместе с проверкой
             # «помещается ли ещё вопрос» соврали бы.
-            agent.conversation.forget_exact()
+            conversation.forget_exact()
+        # Ветки собираются вокруг уже прочитанной переписки: она и остаётся
+        # активной веткой. Настройки сборки запроса раздаёт агент — им место
+        # в конфиге, а не в файле разговора.
+        agent.branches = Branches.restore(record.branches, conversation)
+        agent.conversation = conversation
     if record.usage:
         agent.usage = UsageMeter.restore(record.usage)
     return agent

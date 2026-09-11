@@ -11,12 +11,16 @@
     print(agent.ask("Привет!").text)
 """
 from .agent import Agent
+from .branches import Branch, Branches, Checkpoint
 from .config import (
     DEFAULT_CONFIG,
+    STRATEGIES,
+    STRATEGY_NOTES,
     SYSTEM_PROMPT,
     AgentConfig,
     Budget,
     CompressionConfig,
+    FactsConfig,
     HistoryConfig,
     InputPolicy,
     JudgeConfig,
@@ -52,6 +56,8 @@ __version__ = "2.0.0"
 __all__ = [
     "Agent", "AgentConfig", "AgentResult", "DEFAULT_CONFIG", "SYSTEM_PROMPT",
     "InputPolicy", "OutputPolicy", "JudgeConfig", "HistoryConfig", "CompressionConfig",
+    "FactsConfig", "STRATEGIES", "STRATEGY_NOTES",
+    "Branch", "Branches", "Checkpoint",
     "Budget", "Transport",
     "ToolPolicy", "Toolbox", "ToolSpec", "ToolOutcome", "spawn_agent_spec", "SPAWN_AGENT",
     "GenerationParams", "Schema", "Field", "Check", "Validation",
