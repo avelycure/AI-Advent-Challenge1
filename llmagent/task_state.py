@@ -1,0 +1,174 @@
+"""Формализованное состояние текущей задачи.
+
+Состояние хранит три вещи, которых недостаточно в обычной переписке:
+этап, конкретный текущий шаг и действие, ожидаемое дальше. Пауза — отдельный
+флаг, поэтому она не разрушает этап и после продолжения агент оказывается
+ровно в той же точке.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+from .errors import AgentError
+
+PLANNING = "planning"
+EXECUTION = "execution"
+VALIDATION = "validation"
+DONE = "done"
+TASK_STAGES = (PLANNING, EXECUTION, VALIDATION, DONE)
+
+NEXT_STAGE = {
+    PLANNING: EXECUTION,
+    EXECUTION: VALIDATION,
+    VALIDATION: DONE,
+}
+
+TASK_STATE_PREFIX = (
+    "Формализованное состояние текущей задачи. Используй его как источник "
+    "истины: не проси повторно цель и уже сохранённый контекст.\n\n"
+)
+
+
+def _clean(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+@dataclass
+class TaskState:
+    """Конечный автомат ``planning → execution → validation → done``."""
+
+    stage: str = PLANNING
+    current_step: str = ""
+    expected_action: str = ""
+    paused: bool = False
+    active: bool = False
+
+    def __post_init__(self) -> None:
+        if self.stage not in TASK_STAGES:
+            raise AgentError("неизвестный этап задачи «{}»; доступны: {}".format(
+                self.stage, ", ".join(TASK_STAGES)))
+        self.current_step = _clean(self.current_step)
+        self.expected_action = _clean(self.expected_action)
+        self.paused = bool(self.paused) and bool(self.active)
+
+    @property
+    def status(self) -> str:
+        if not self.active:
+            return "inactive"
+        return "paused" if self.paused else self.stage
+
+    @property
+    def next_stage(self) -> str:
+        return NEXT_STAGE.get(self.stage, "")
+
+    def start(self, current_step: str = "", expected_action: str = "") -> None:
+        """Начать новую задачу с этапа планирования."""
+        self.stage = PLANNING
+        self.current_step = _clean(current_step)
+        self.expected_action = _clean(expected_action)
+        self.paused = False
+        self.active = True
+
+    def update(self, current_step: Optional[str] = None,
+               expected_action: Optional[str] = None) -> None:
+        """Уточнить шаг внутри этапа, не выполняя переход."""
+        self._require_active()
+        if current_step is not None:
+            self.current_step = _clean(current_step)
+        if expected_action is not None:
+            self.expected_action = _clean(expected_action)
+
+    def transition(self, stage: str, current_step: Optional[str] = None,
+                   expected_action: Optional[str] = None) -> None:
+        """Перейти в тот же или строго следующий этап автомата."""
+        self._require_active()
+        wanted = _clean(stage).lower()
+        if self.paused:
+            raise AgentError("задача на паузе; сначала продолжите её")
+        allowed = (self.stage, self.next_stage)
+        if wanted not in allowed:
+            if not self.next_stage:
+                raise AgentError("этап done завершающий; начните новую задачу")
+            raise AgentError(
+                "из {} можно перейти только в {}; пропускать этапы и идти "
+                "назад нельзя".format(self.stage, self.next_stage))
+        self.stage = wanted
+        if current_step is not None:
+            self.current_step = _clean(current_step)
+        if expected_action is not None:
+            self.expected_action = _clean(expected_action)
+
+    def advance(self, current_step: str = "", expected_action: str = "") -> None:
+        """Перейти в следующий этап без повторения его имени."""
+        self._require_active()
+        if not self.next_stage:
+            raise AgentError("этап done завершающий; начните новую задачу")
+        self.transition(self.next_stage, current_step, expected_action)
+
+    def pause(self) -> None:
+        """Приостановить задачу, сохранив этап, шаг и ожидаемое действие."""
+        self._require_active()
+        if self.paused:
+            raise AgentError("задача уже на паузе")
+        self.paused = True
+
+    def resume(self) -> None:
+        """Продолжить задачу с сохранённого места."""
+        self._require_active()
+        if not self.paused:
+            raise AgentError("задача не на паузе")
+        self.paused = False
+
+    def reset(self) -> None:
+        self.stage = PLANNING
+        self.current_step = ""
+        self.expected_action = ""
+        self.paused = False
+        self.active = False
+
+    def prompt_message(self) -> Optional[Dict[str, str]]:
+        """Служебное сообщение, которое сопровождает каждый следующий запрос."""
+        if not self.active:
+            return None
+        lines = [
+            "Этап: {}".format(self.stage),
+            "Текущий шаг: {}".format(self.current_step or "не уточнён"),
+            "Ожидаемое действие: {}".format(
+                self.expected_action or "продолжить текущий шаг"),
+            "Статус: {}".format("пауза" if self.paused else "в работе"),
+        ]
+        if self.paused:
+            lines.append(
+                "Задача приостановлена. Не выполняй следующий шаг, пока пауза не снята.")
+        else:
+            lines.append("Продолжай с этого места без повторного сбора уже известных данных.")
+        return {"role": "user", "content": TASK_STATE_PREFIX + "\n".join(lines)}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "active": self.active,
+            "stage": self.stage,
+            "current_step": self.current_step,
+            "expected_action": self.expected_action,
+            "paused": self.paused,
+        }
+
+    @classmethod
+    def restore(cls, payload: Any) -> "TaskState":
+        if not isinstance(payload, dict):
+            return cls()
+        stage = _clean(payload.get("stage")).lower() or PLANNING
+        if stage not in TASK_STAGES:
+            stage = PLANNING
+        return cls(
+            active=bool(payload.get("active")),
+            stage=stage,
+            current_step=_clean(payload.get("current_step")),
+            expected_action=_clean(payload.get("expected_action")),
+            paused=bool(payload.get("paused")),
+        )
+
+    def _require_active(self) -> None:
+        if not self.active:
+            raise AgentError("текущая задача не начата")

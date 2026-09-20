@@ -32,6 +32,7 @@ from .memory import LONG_TERM, SHORT_TERM, WORKING, LongTermMemory, WorkingMemor
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .tools import Toolbox, ToolOutcome
+from .task_state import TaskState
 from .transport import (
     Completion,
     ToolCall,
@@ -124,6 +125,49 @@ class Agent:
     def working_memory(self) -> WorkingMemory:
         """Явная память текущей задачи активной ветки."""
         return self.branches.working_memory
+
+    @property
+    def task_state(self) -> TaskState:
+        """Формализованное состояние задачи активной ветки."""
+        return self.branches.task_state
+
+    def start_task(self, current_step: str = "", expected_action: str = "") -> TaskState:
+        self.task_state.start(current_step, expected_action)
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def update_task(self, current_step: Optional[str] = None,
+                    expected_action: Optional[str] = None) -> TaskState:
+        self.task_state.update(current_step, expected_action)
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def transition_task(self, stage: str, current_step: Optional[str] = None,
+                        expected_action: Optional[str] = None) -> TaskState:
+        self.task_state.transition(stage, current_step, expected_action)
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def advance_task(self, current_step: str = "",
+                     expected_action: str = "") -> TaskState:
+        self.task_state.advance(current_step, expected_action)
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def pause_task(self) -> TaskState:
+        self.task_state.pause()
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def resume_task(self) -> TaskState:
+        self.task_state.resume()
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def reset_task(self) -> TaskState:
+        self.task_state.reset()
+        self.conversation.forget_exact()
+        return self.task_state
 
     def remember(self, layer: str, key: str, value: str,
                  section: str = "") -> bool:
@@ -306,10 +350,12 @@ class Agent:
             conversation = self._plain_conversation()
             return request_breakdown(conversation, self._system_prompt(),
                                      self.output_reserve, self.context_limit,
-                                     long_term_messages=self._profile_messages(request))
+                                     long_term_messages=self._profile_messages(request),
+                                     task_message=self.task_state.prompt_message())
         return request_breakdown(self.conversation, self._system_prompt(),
                                  self.output_reserve, self.context_limit,
                                  working_message=self.working_memory.prompt_message(),
+                                 task_message=self.task_state.prompt_message(),
                                  long_term_messages=
                                  self.long_term_memory.prompt_messages(request))
 
@@ -730,13 +776,17 @@ class Agent:
                                              self._config.system_prompt)
 
     def _memory_messages(self, request: str = "") -> List[Dict[str, str]]:
-        """Долговременная, затем рабочая: текущий слой ближе к вопросу."""
+        """Долговременная память, рабочая память и состояние задачи."""
         if not self._config.history.enabled:
-            return self._profile_messages(request)
-        messages = self.long_term_memory.prompt_messages(request)
-        working = self.working_memory.prompt_message()
-        if working is not None:
-            messages.append(working)
+            messages = self._profile_messages(request)
+        else:
+            messages = self.long_term_memory.prompt_messages(request)
+            working = self.working_memory.prompt_message()
+            if working is not None:
+                messages.append(working)
+        task = self.task_state.prompt_message()
+        if task is not None:
+            messages.append(task)
         return messages
 
     def _profile_messages(self, request: str) -> List[Dict[str, str]]:
@@ -791,7 +841,7 @@ class Agent:
     def _plain_messages(self, text: str) -> List[Dict[str, str]]:
         prompt = self._system_prompt()
         messages = [{"role": "system", "content": prompt}] if prompt else []
-        messages.extend(self._profile_messages(text))
+        messages.extend(self._memory_messages(text))
         messages.append({"role": "user", "content": text})
         return messages
 

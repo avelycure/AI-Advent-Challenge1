@@ -28,6 +28,7 @@ class RequestBreakdown:
     # Явные слои памяти, не зависящие от стратегии краткосрочной истории.
     long_term: int
     working: int
+    task: int
     # Пересказ сжатого начала: то, что уходит в модель вместо него.
     summary: int
     # Блок фактов: то, что уходит в модель вместо забытого окном начала.
@@ -61,7 +62,7 @@ class RequestBreakdown:
     @property
     def estimated_input(self) -> int:
         """Размер запроса по локальной оценке — без единого обращения к API."""
-        return (self.system + self.long_term + self.working
+        return (self.system + self.long_term + self.working + self.task
                 + self.summary + self.facts + self.history
                 + self.pending + self.overhead)
 
@@ -112,6 +113,7 @@ class RequestBreakdown:
             Part("Системный промпт", self.system),
             Part("Долговременная память", self.long_term),
             Part("Рабочая память", self.working),
+            Part("Состояние задачи", self.task),
             Part("Пересказ начала", self.summary),
             Part("Факты разговора", self.facts),
             Part("История диалога", self.history),
@@ -159,6 +161,7 @@ class Step:
 def request_breakdown(conversation: Conversation, system_prompt: str,
                       reserve: int, window: int,
                       working_message: Optional[Dict[str, str]] = None,
+                      task_message: Optional[Dict[str, str]] = None,
                       long_term_messages: Optional[List[Dict[str, str]]] = None
                       ) -> RequestBreakdown:
     """Разложить ближайший запрос на части.
@@ -185,6 +188,8 @@ def request_breakdown(conversation: Conversation, system_prompt: str,
         if long_term_messages else 0,
         working=(count_text_tokens(working_message["content"]) + MESSAGE_OVERHEAD)
         if working_message else 0,
+        task=(count_text_tokens(task_message["content"]) + MESSAGE_OVERHEAD)
+        if task_message else 0,
         summary=(count_text_tokens(conversation.summary_message()["content"])
                  + MESSAGE_OVERHEAD) if sends_summary else 0,
         facts=(count_text_tokens(conversation.facts_message()["content"])

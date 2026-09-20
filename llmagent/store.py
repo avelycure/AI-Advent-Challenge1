@@ -24,12 +24,13 @@ from .config import AgentConfig
 from .errors import AgentError
 from .history import Conversation
 from .memory import WorkingMemory
+from .task_state import TaskState
 from .usage import UsageMeter
 
 DEFAULT_ROOT = pathlib.Path("~/.llm-agent/sessions")
 FILE_MODE = 0o600      # переписка — личное дело владельца
 DIR_MODE = 0o700
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 class SessionNotFound(AgentError):
@@ -65,6 +66,8 @@ class SessionRecord:
     conversation: Dict[str, Any] = field(default_factory=dict)
     # Явная память текущей задачи хранится отдельно от переписки.
     working_memory: Dict[str, Any] = field(default_factory=dict)
+    # Этап, шаг, ожидаемое действие и пауза активной ветки.
+    task_state: Dict[str, Any] = field(default_factory=dict)
     # Ветки разговора и точки возврата. Пусто в файлах, записанных до их
     # появления: тогда ветка ровно одна — та самая переписка.
     branches: Dict[str, Any] = field(default_factory=dict)
@@ -154,7 +157,8 @@ class SessionStore:
         разговор пропал бы молча, — поэтому сессия отделяется под новым
         идентификатором, а вызывающему об этом сообщается.
         """
-        if not agent.conversation.messages and not agent.working_memory.items:
+        if (not agent.conversation.messages and not agent.working_memory.items
+                and not agent.task_state.active):
             return Saved(self.path_for(agent.session_id), agent.session_id, seen_at or 0.0)
 
         forked_from = ""
@@ -185,6 +189,7 @@ class SessionStore:
             "config": _config_without_secrets(agent.config),
             "conversation": agent.conversation.to_dict(),
             "working_memory": agent.working_memory.to_dict(),
+            "task_state": agent.task_state.to_dict(),
             "branches": agent.branches.to_dict(),
             "usage": agent.usage.to_dict(),
         }
@@ -331,6 +336,7 @@ class SessionStore:
             config=dict(payload.get("config") or {}),
             conversation=dict(payload.get("conversation") or {}),
             working_memory=dict(payload.get("working_memory") or {}),
+            task_state=dict(payload.get("task_state") or {}),
             branches=dict(payload.get("branches") or {}),
             usage=dict(payload.get("usage") or {}),
             path=str(path),
@@ -390,6 +396,7 @@ def restore_agent(record: SessionRecord, config: AgentConfig, **kwargs):
     if record.conversation:
         conversation = Conversation.restore(record.conversation)
         working_memory = WorkingMemory.restore(record.working_memory)
+        task_state = TaskState.restore(record.task_state)
         stored = record.config
         if (stored.get("provider"), stored.get("model")) != (config.provider, config.model):
             # Точный размер контекста измерен токенизатором прежней модели.
@@ -404,11 +411,16 @@ def restore_agent(record: SessionRecord, config: AgentConfig, **kwargs):
         # Ветки собираются вокруг уже прочитанной переписки: она и остаётся
         # активной веткой. Настройки сборки запроса раздаёт агент — им место
         # в конфиге, а не в файле разговора.
-        agent.branches = Branches.restore(record.branches, conversation, working_memory)
+        agent.branches = Branches.restore(
+            record.branches, conversation, working_memory, task_state)
         agent.conversation = conversation
-    elif record.working_memory:
-        # Рабочую память можно сохранить ещё до первого вопроса.
-        agent.branches.working_memory = WorkingMemory.restore(record.working_memory)
+    else:
+        if record.working_memory:
+            # Рабочую память можно сохранить ещё до первого вопроса.
+            agent.branches.working_memory = WorkingMemory.restore(record.working_memory)
+        if record.task_state:
+            # Состояние задачи можно сохранить до первой реплики.
+            agent.branches.task_state = TaskState.restore(record.task_state)
     if record.usage:
         agent.usage = UsageMeter.restore(record.usage)
     return agent

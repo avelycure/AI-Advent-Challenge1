@@ -139,6 +139,10 @@ class Session:
         return self.agent.working_memory.items
 
     @property
+    def task_state(self):
+        return self.agent.task_state
+
+    @property
     def long_term_memory(self):
         return self.agent.long_term_memory
 

@@ -55,6 +55,14 @@ from .memory import (
     WorkingMemory,
 )
 from .profile import UserProfile
+from .task_state import (
+    DONE,
+    EXECUTION,
+    PLANNING,
+    TASK_STAGES,
+    VALIDATION,
+    TaskState,
+)
 from .params import GenerationParams
 from .catalog import find_model
 from .overrides import append_system_prompt
@@ -78,6 +86,7 @@ __all__ = [
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",
     "Conversation", "Message", "UsageMeter", "RequestBreakdown", "Step",
     "WorkingMemory", "LongTermMemory", "MemoryStore", "UserProfile",
+    "TaskState", "TASK_STAGES", "PLANNING", "EXECUTION", "VALIDATION", "DONE",
     "SHORT_TERM", "WORKING", "LONG_TERM", "PROFILE", "RULES", "DECISIONS",
     "KNOWLEDGE", "LONG_TERM_SECTIONS",
     "ClientRegistry", "Credentials", "SHARED", "resolve_credentials",

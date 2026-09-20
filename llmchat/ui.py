@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from llmagent import Message
+from llmagent.task_state import TASK_STAGES
 from llmagent.config import FACTS, FULL, STRATEGIES, STRATEGY_NOTES, SUMMARY, WINDOW
 from llmagent.params import SPECS
 from llmagent.transport import (
@@ -564,6 +565,15 @@ def build_stats(session: Session, width: int) -> RenderableType:
         params_line.append(" · ".join("{}={}".format(name, value) for name, value in changed),
                            style="yellow")
 
+    task_line = None
+    if session.task_state.active:
+        task_line = Text()
+        task_line.append("Задача: ", style="bold")
+        task_line.append(session.task_state.stage, style="magenta")
+        task_line.append(" · " + (session.task_state.current_step or "шаг не уточнён"))
+        if session.task_state.paused:
+            task_line.append(" · ПАУЗА", style="bold yellow")
+
     if right_top is not None:
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
@@ -571,11 +581,14 @@ def build_stats(session: Session, width: int) -> RenderableType:
         grid.add_column(justify="right")
         grid.add_row(left_top, "", right_top)
         grid.add_row(left_bottom, "", right_bottom)
-        body = Group(grid, params_line) if params_line else grid
+        extras = [part for part in (task_line, params_line) if part is not None]
+        body = Group(grid, *extras) if extras else grid
         subtitle = "[dim]/help — команды · /new — новый диалог · /exit — выход[/]"
     else:
         # Узкий терминал: колонки рядом не помещаются — выкладываем строками.
         parts = [left_top, right_top_short, left_bottom, right_bottom]
+        if task_line:
+            parts.append(task_line)
         if params_line:
             parts.append(params_line)
         body = Group(*parts)
@@ -923,6 +936,9 @@ COMMANDS: List[tuple] = [
     ("/facts", "картотека важных сведений разговора; её можно поправить руками"),
     ("/memory", "три явных слоя: диалог, данные задачи, профиль и память проекта"),
     ("/profile", "персональные настройки: обращение, стиль, формат и правила задач"),
+    ("/task", "состояние задачи: этап, текущий шаг и ожидаемое действие"),
+    ("/pause", "поставить текущую задачу на паузу, сохранив место"),
+    ("/resume", "продолжить задачу с сохранённого места"),
     ("/checkpoint", "запомнить место в разговоре, от которого можно отвести ветку"),
     ("/branch", "отвести ветку от точки возврата и продолжать разговор в ней"),
     ("/branches", "список веток и точек возврата"),
@@ -956,6 +972,9 @@ COMBINE_HINTS: List[tuple] = [
     ("/profile style.tone=кратко и по делу", "задать стиль всех ответов"),
     ("/profile task.feature.match=напиши фичу,реализуй фичу", "распознать тип задачи"),
     ("/profile task.feature.instructions=сначала план, затем реализация", "правило для типа задачи"),
+    ("/task start Составить план | Подтвердить план", "начать задачу на этапе planning"),
+    ("/task next Реализовать изменения | Запустить тесты", "перейти в следующий этап"),
+    ("/task step Исправить тест | Повторить проверку", "обновить шаг внутри этапа"),
     ("/memory long rules no_push=без явной команды", "сохранить правило проекта"),
     ("/checkpoint выбор-стека", "запомнить место; от него потом отводят ветки"),
     ("/branch вариант-а выбор-стека", "две ветки от одного места: имя и точка"),
@@ -1077,6 +1096,46 @@ def memory_panel(session: Session, note: str = "") -> RenderableType:
         style="dim"))
     return Panel(Group(*blocks), title="Память агента", title_align="left",
                  border_style="bright_magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def task_panel(session: Session, note: str = "") -> RenderableType:
+    """Показать конечный автомат текущей задачи и команды переходов."""
+    state = session.task_state
+    blocks: List[RenderableType] = []
+    if note:
+        blocks.append(Text(note, style="green"))
+
+    stages = Text()
+    for index, stage in enumerate(TASK_STAGES):
+        if index:
+            stages.append("  →  ", style="dim")
+        here = state.active and stage == state.stage
+        stages.append("▸ " + stage if here else stage,
+                      style="bold magenta" if here else "dim")
+    blocks.append(stages)
+
+    if not state.active:
+        blocks.append(Text(
+            "Задача не начата. /task start шаг | ожидаемое действие",
+            style="dim"))
+    else:
+        table = _help_table()
+        table.add_column("Поле", style="bold", no_wrap=True)
+        table.add_column("Значение")
+        table.add_row("Этап", state.stage)
+        table.add_row("Текущий шаг", state.current_step or "не уточнён")
+        table.add_row("Ожидаемое действие",
+                      state.expected_action or "продолжить текущий шаг")
+        table.add_row("Статус", Text("пауза" if state.paused else "в работе",
+                                     style="yellow" if state.paused else "green"))
+        blocks.append(table)
+
+    blocks.append(Text(
+        "/task start шаг | действие · /task step шаг | действие · "
+        "/task next шаг | действие · /pause · /resume · /task reset",
+        style="dim"))
+    return Panel(Group(*blocks), title="Состояние задачи", title_align="left",
+                 border_style="magenta", box=box.ROUNDED, padding=(0, 1))
 
 
 def _memory_items(title: str, items) -> Table:

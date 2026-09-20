@@ -29,6 +29,7 @@ from llmagent import (
     MemoryStore,
     SessionRecord,
     SessionStore,
+    TASK_STAGES,
     Transport,
     find_model,
     overrides,
@@ -51,6 +52,7 @@ from .ui import (
     choose_model,
     facts_panel,
     memory_panel,
+    task_panel,
     strategy_panel,
     format_cost,
     format_seconds,
@@ -513,6 +515,18 @@ def chat_loop(console: Console, keys, session: Session,
                 notice = handle_profile(session, argument, memory_store)
                 remember()
                 continue
+            if command in ("/task", "/state"):
+                notice = handle_task(session, argument)
+                remember()
+                continue
+            if command == "/pause":
+                notice = pause_task(session)
+                remember()
+                continue
+            if command == "/resume":
+                notice = resume_task(session)
+                remember()
+                continue
             if command in ("/checkpoint", "/point"):
                 notice = mark_checkpoint(session, argument)
                 remember()
@@ -850,6 +864,70 @@ def handle_profile(session: Session, argument: str,
     if not assignment:
         return memory_panel(session)
     return handle_memory(session, "long profile " + assignment, store)
+
+
+def handle_task(session: Session, argument: str) -> RenderableType:
+    """Показать или изменить состояние конечного автомата задачи."""
+    words = argument.strip().split(None, 1)
+    if not words:
+        return task_panel(session)
+    action = words[0].lower()
+    details = words[1] if len(words) > 1 else ""
+    step, expected = _task_details(details)
+
+    try:
+        if action == "start":
+            session.agent.start_task(step, expected)
+            return task_panel(session, "Новая задача начата с этапа planning.")
+        if action in ("step", "update", "set"):
+            session.agent.update_task(step, expected)
+            return task_panel(session, "Текущий шаг обновлён.")
+        if action == "next":
+            previous = session.task_state.stage
+            session.agent.advance_task(step, expected)
+            return task_panel(session, "Переход: {} → {}.".format(
+                previous, session.task_state.stage))
+        if action == "reset":
+            session.agent.reset_task()
+            return task_panel(session, "Состояние задачи очищено.")
+        if action in TASK_STAGES:
+            if not session.task_state.active:
+                if action != TASK_STAGES[0]:
+                    return error_panel(
+                        "Новая задача начинается с planning: /task start шаг | действие.")
+                session.agent.start_task(step, expected)
+            else:
+                session.agent.transition_task(action, step, expected)
+            return task_panel(session, "Этап задачи: {}.".format(action))
+        return error_panel(
+            "Неизвестное действие «{}». Используйте start, step, next, "
+            "planning, execution, validation, done или reset.".format(action))
+    except AgentError as exc:
+        return error_panel(escape(str(exc)))
+
+
+def pause_task(session: Session) -> RenderableType:
+    """Поставить автомат на паузу, не меняя его координаты."""
+    try:
+        session.agent.pause_task()
+    except AgentError as exc:
+        return error_panel(escape(str(exc)))
+    return task_panel(session, "Задача приостановлена; этап и шаг сохранены.")
+
+
+def resume_task(session: Session) -> RenderableType:
+    """Снять паузу и показать точку, с которой продолжится работа."""
+    try:
+        session.agent.resume_task()
+    except AgentError as exc:
+        return error_panel(escape(str(exc)))
+    return task_panel(session, "Задача продолжена с сохранённого места.")
+
+
+def _task_details(text: str):
+    """Разобрать ``текущий шаг | ожидаемое действие``."""
+    step, separator, expected = text.partition("|")
+    return step.strip(), expected.strip() if separator else ""
 
 
 def _memory_assignment(text: str):
