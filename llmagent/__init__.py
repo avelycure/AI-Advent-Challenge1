@@ -41,6 +41,19 @@ from .errors import (
 from .formats import FORMATS, FREE_FORMAT, STOP_MARKER, Check, Field, Schema, Validation
 from .breakdown import RequestBreakdown, Step
 from .history import Conversation, Message
+from .memory import (
+    DECISIONS,
+    KNOWLEDGE,
+    LONG_TERM,
+    LONG_TERM_SECTIONS,
+    PROFILE,
+    RULES,
+    SHORT_TERM,
+    WORKING,
+    LongTermMemory,
+    MemoryStore,
+    WorkingMemory,
+)
 from .params import GenerationParams
 from .catalog import find_model
 from .overrides import append_system_prompt
@@ -63,6 +76,9 @@ __all__ = [
     "GenerationParams", "Schema", "Field", "Check", "Validation",
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",
     "Conversation", "Message", "UsageMeter", "RequestBreakdown", "Step",
+    "WorkingMemory", "LongTermMemory", "MemoryStore",
+    "SHORT_TERM", "WORKING", "LONG_TERM", "PROFILE", "RULES", "DECISIONS",
+    "KNOWLEDGE", "LONG_TERM_SECTIONS",
     "ClientRegistry", "Credentials", "SHARED", "resolve_credentials",
     "SessionStore", "SessionRecord", "SessionNotFound", "restore_agent",
     "find_model", "append_system_prompt",

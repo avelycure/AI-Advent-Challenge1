@@ -277,10 +277,13 @@ class Conversation:
                 return index
         return -1
 
-    def api_messages(self, system_prompt: str) -> List[Dict[str, str]]:
-        return self.api_messages_upto(len(self.messages) - 1, system_prompt)
+    def api_messages(self, system_prompt: str,
+                     prefix: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
+        return self.api_messages_upto(len(self.messages) - 1, system_prompt, prefix)
 
-    def api_messages_upto(self, index: int, system_prompt: str) -> List[Dict[str, str]]:
+    def api_messages_upto(self, index: int, system_prompt: str,
+                          prefix: Optional[List[Dict[str, str]]] = None
+                          ) -> List[Dict[str, str]]:
         """История по указанное сообщение включительно — для повторного запроса.
 
         Что именно уйдёт, решает стратегия: вся переписка, последние N
@@ -292,6 +295,10 @@ class Conversation:
         с самого начала.
         """
         payload = [{"role": "system", "content": system_prompt}] if system_prompt else []
+        # Явные слои памяти идут после единственного system message и до
+        # краткосрочного диалога. Некоторые провайдеры не принимают второй
+        # system message, поэтому память, как summary и facts, имеет роль user.
+        payload += list(prefix or [])
         start = self.sent_from(index)
         if start and self.strategy == SUMMARY:
             payload.append(self.summary_message())

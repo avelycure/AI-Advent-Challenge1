@@ -23,12 +23,13 @@ from .branches import Branches
 from .config import AgentConfig
 from .errors import AgentError
 from .history import Conversation
+from .memory import WorkingMemory
 from .usage import UsageMeter
 
 DEFAULT_ROOT = pathlib.Path("~/.llm-agent/sessions")
 FILE_MODE = 0o600      # переписка — личное дело владельца
 DIR_MODE = 0o700
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 class SessionNotFound(AgentError):
@@ -62,6 +63,8 @@ class SessionRecord:
     updated_at: float = 0.0
     config: Dict[str, Any] = field(default_factory=dict)
     conversation: Dict[str, Any] = field(default_factory=dict)
+    # Явная память текущей задачи хранится отдельно от переписки.
+    working_memory: Dict[str, Any] = field(default_factory=dict)
     # Ветки разговора и точки возврата. Пусто в файлах, записанных до их
     # появления: тогда ветка ровно одна — та самая переписка.
     branches: Dict[str, Any] = field(default_factory=dict)
@@ -151,7 +154,7 @@ class SessionStore:
         разговор пропал бы молча, — поэтому сессия отделяется под новым
         идентификатором, а вызывающему об этом сообщается.
         """
-        if not agent.conversation.messages:
+        if not agent.conversation.messages and not agent.working_memory.items:
             return Saved(self.path_for(agent.session_id), agent.session_id, seen_at or 0.0)
 
         forked_from = ""
@@ -181,6 +184,7 @@ class SessionStore:
             "updated_at": stamp,
             "config": _config_without_secrets(agent.config),
             "conversation": agent.conversation.to_dict(),
+            "working_memory": agent.working_memory.to_dict(),
             "branches": agent.branches.to_dict(),
             "usage": agent.usage.to_dict(),
         }
@@ -326,6 +330,7 @@ class SessionStore:
             updated_at=float(payload.get("updated_at") or 0.0),
             config=dict(payload.get("config") or {}),
             conversation=dict(payload.get("conversation") or {}),
+            working_memory=dict(payload.get("working_memory") or {}),
             branches=dict(payload.get("branches") or {}),
             usage=dict(payload.get("usage") or {}),
             path=str(path),
@@ -384,17 +389,26 @@ def restore_agent(record: SessionRecord, config: AgentConfig, **kwargs):
     agent = Agent(config, session_id=record.session_id, **kwargs)
     if record.conversation:
         conversation = Conversation.restore(record.conversation)
+        working_memory = WorkingMemory.restore(record.working_memory)
         stored = record.config
         if (stored.get("provider"), stored.get("model")) != (config.provider, config.model):
             # Точный размер контекста измерен токенизатором прежней модели.
             # После смены он неверен, и полоса заполнения вместе с проверкой
             # «помещается ли ещё вопрос» соврали бы.
             conversation.forget_exact()
+        elif agent.long_term_memory.prompt_messages():
+            # Долговременная память хранится отдельно и могла измениться после
+            # последнего ответа этой сессии. Старый точный размер больше нельзя
+            # считать измерением ближайшего запроса.
+            conversation.forget_exact()
         # Ветки собираются вокруг уже прочитанной переписки: она и остаётся
         # активной веткой. Настройки сборки запроса раздаёт агент — им место
         # в конфиге, а не в файле разговора.
-        agent.branches = Branches.restore(record.branches, conversation)
+        agent.branches = Branches.restore(record.branches, conversation, working_memory)
         agent.conversation = conversation
+    elif record.working_memory:
+        # Рабочую память можно сохранить ещё до первого вопроса.
+        agent.branches.working_memory = WorkingMemory.restore(record.working_memory)
     if record.usage:
         agent.usage = UsageMeter.restore(record.usage)
     return agent

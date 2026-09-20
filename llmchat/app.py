@@ -26,6 +26,7 @@ from llmagent import (
     InputRejected,
     LLMError,
     MissingCredentials,
+    MemoryStore,
     SessionRecord,
     SessionStore,
     Transport,
@@ -49,6 +50,7 @@ from .ui import (
     branches_panel,
     choose_model,
     facts_panel,
+    memory_panel,
     strategy_panel,
     format_cost,
     format_seconds,
@@ -433,7 +435,8 @@ def handle_params_command(session: Session, argument: str) -> RenderableType:
 
 
 def chat_loop(console: Console, keys, session: Session,
-              sessions: Optional[SessionStore] = None) -> None:
+              sessions: Optional[SessionStore] = None,
+              memory_store: Optional[MemoryStore] = None) -> None:
     """Цикл диалога. ``sessions`` задан — разговор пишется на диск после ответа."""
     notice: Optional[RenderableType] = None
 
@@ -500,6 +503,10 @@ def chat_loop(console: Console, keys, session: Session,
                 continue
             if command in ("/facts", "/fact"):
                 notice = handle_facts(console, session, argument)
+                remember()
+                continue
+            if command in ("/memory", "/mem"):
+                notice = handle_memory(session, argument, memory_store)
                 remember()
                 continue
             if command in ("/checkpoint", "/point"):
@@ -772,6 +779,73 @@ def handle_facts(console: Console, session: Session, argument: str) -> Renderabl
     if not changed:
         return facts_panel(session)
     return facts_panel(session, changed=changed)
+
+
+def handle_memory(session: Session, argument: str,
+                  store: Optional[MemoryStore] = None) -> RenderableType:
+    """Явно направить запись в рабочую или долговременную память."""
+    words = argument.strip().split(None, 2)
+    if not words:
+        return memory_panel(session)
+
+    aliases = {"short": "short", "краткая": "short",
+               "work": "working", "working": "working", "рабочая": "working",
+               "long": "long", "long-term": "long", "долгая": "long"}
+    layer = aliases.get(words[0].lower(), words[0].lower())
+    try:
+        if layer == "short":
+            if len(words) > 1:
+                return error_panel(
+                    "Краткосрочная память заполняется обычными репликами и "
+                    "очищается /new; вручную в неё не записывают.")
+            return memory_panel(session)
+
+        if layer == "working":
+            assignment = argument.strip().partition(" ")[2].strip()
+            if not assignment:
+                return memory_panel(session)
+            key, value = _memory_assignment(assignment)
+            changed = session.agent.remember("working", key, value)
+            action = "записано" if value else "забыто"
+            note = "Рабочая память: {} «{}»{}".format(
+                action, key, "" if changed else " (без изменений)")
+            return memory_panel(session, note)
+
+        if layer == "long":
+            if len(words) < 2:
+                return memory_panel(session)
+            section = words[1].lower()
+            if len(words) < 3:
+                return error_panel(
+                    "Нужна запись: /memory long "
+                    "profile|rules|decisions|knowledge ключ=значение")
+            key, value = _memory_assignment(words[2])
+            if store is not None:
+                # Store перечитывает данные под блокировкой и возвращает свежий
+                # снимок. Live-память меняется только после успешной записи.
+                memory, changed = store.remember(section, key, value)
+                session.agent.replace_long_term_memory(memory)
+            else:
+                changed = session.agent.remember("long", key, value, section=section)
+            action = "записано" if value else "забыто"
+            note = "Долговременная память · {}: {} «{}»{}".format(
+                section, action, key, "" if changed else " (без изменений)")
+            return memory_panel(session, note)
+
+        return error_panel(
+            "Неизвестный слой «{}». Используйте short, working или long.".format(
+                words[0]))
+    except (AgentError, OSError) as exc:
+        return error_panel(str(exc))
+
+
+def _memory_assignment(text: str):
+    key, separator, value = text.partition("=")
+    key = key.strip()
+    if not separator or not key:
+        raise AgentError(
+            "Запись памяти задаётся как ключ=значение; пустое значение удаляет ключ.")
+    return key, value.strip()
 
 
 def mark_checkpoint(session: Session, argument: str) -> RenderableType:
@@ -1154,7 +1228,8 @@ def when(moment: float) -> str:
 
 
 def agent_from_config(console: Console, config: AgentConfig, store,
-                      session_id: Optional[str] = None) -> Agent:
+                      session_id: Optional[str] = None,
+                      long_term_memory=None) -> Agent:
     """Собрать агента по готовому конфигу, спросив только недостающее.
 
     Заданный файлом конфиг проходит без единого вопроса — ровно так же, как
@@ -1162,7 +1237,8 @@ def agent_from_config(console: Console, config: AgentConfig, store,
     тогда, когда ключа нет ни в конфиге, ни в окружении, ни в файле.
     """
     agent = Agent(config, session_id=session_id,
-                  toolbox=subagent.toolbox_for(config))
+                  toolbox=subagent.toolbox_for(config),
+                  long_term_memory=long_term_memory)
     try:
         agent.credentials
         return agent
@@ -1175,10 +1251,12 @@ def agent_from_config(console: Console, config: AgentConfig, store,
     provider = config.provider_info
     credentials = store.ready_for(console, provider)
     ready = config.with_changes(api_key=credentials.key, api_extra=credentials.extra)
-    return Agent(ready, session_id=session_id, toolbox=subagent.toolbox_for(ready))
+    return Agent(ready, session_id=session_id, toolbox=subagent.toolbox_for(ready),
+                 long_term_memory=long_term_memory)
 
 
-def one_shot(args: argparse.Namespace, sessions: SessionStore) -> int:
+def one_shot(args: argparse.Namespace, sessions: SessionStore,
+             memory_store: Optional[MemoryStore] = None) -> int:
     """Один вопрос без диалога: этим режимом родитель вызывает под-агента.
 
     Ни одного вопроса в консоль здесь не задаётся — процесс может быть
@@ -1209,10 +1287,13 @@ def one_shot(args: argparse.Namespace, sessions: SessionStore) -> int:
         record, base = choose_base(args, sessions)
         config = build_config(args, base)
         toolbox = subagent.toolbox_for(config)
+        long_term = memory_store.load() if memory_store is not None else None
         if record is not None:
-            agent = restore_agent(record, config, toolbox=toolbox)
+            agent = restore_agent(record, config, toolbox=toolbox,
+                                  long_term_memory=long_term)
         else:
-            agent = Agent(config, session_id=args.session_id, toolbox=toolbox)
+            agent = Agent(config, session_id=args.session_id, toolbox=toolbox,
+                          long_term_memory=long_term)
         # Реквизиты ищем сразу, а не при первом запросе: у отсутствия ключа
         # должен быть свой код возврата, иначе вызывающий не отличит его от
         # отказа провайдера и станет повторять безнадёжный вызов.
@@ -1320,9 +1401,10 @@ def choose_base(args: argparse.Namespace, sessions: SessionStore):
 
 
 def prepare_agent(console: Console, args: argparse.Namespace, sessions: SessionStore,
-                  keys, record: Optional[SessionRecord], config: AgentConfig) -> Agent:
+                  keys, record: Optional[SessionRecord], config: AgentConfig,
+                  memory_store: Optional[MemoryStore] = None) -> Agent:
     """Собрать агента: из сохранённой сессии, из конфига или через расспрос."""
-    agent = build_agent(console, args, sessions, keys, record, config)
+    agent = build_agent(console, args, sessions, keys, record, config, memory_store)
     return seed_credentials(agent, keys)
 
 
@@ -1340,9 +1422,12 @@ def seed_credentials(agent: Agent, keys) -> Agent:
 
 
 def build_agent(console: Console, args: argparse.Namespace, sessions: SessionStore,
-                keys, record: Optional[SessionRecord], config: AgentConfig) -> Agent:
+                keys, record: Optional[SessionRecord], config: AgentConfig,
+                memory_store: Optional[MemoryStore] = None) -> Agent:
+    long_term = memory_store.load() if memory_store is not None else None
     if record is not None:
-        agent = restore_agent(record, config, toolbox=subagent.toolbox_for(config))
+        agent = restore_agent(record, config, toolbox=subagent.toolbox_for(config),
+                              long_term_memory=long_term)
         console.print(returned_panel(record, agent))
         return agent
 
@@ -1352,10 +1437,11 @@ def build_agent(console: Console, args: argparse.Namespace, sessions: SessionSto
         # Расспрос поверх него не только лишний: он ещё и затирал названное
         # своими ответами, и документированная команда работала не так.
         show_banner(console)
-        return agent_from_config(console, config, keys, session_id)
+        return agent_from_config(console, config, keys, session_id, long_term)
     chosen = setup(console, args.demo, ask_keys=args.ask_keys, store=keys, base=config)
     return Agent(chosen, session_id=session_id,
-                 toolbox=subagent.toolbox_for(chosen))
+                 toolbox=subagent.toolbox_for(chosen),
+                 long_term_memory=long_term)
 
 
 def check_session_id(session_id: Optional[str], sessions: SessionStore) -> Optional[str]:
@@ -1404,6 +1490,7 @@ def returned_panel(record: SessionRecord, agent: Agent) -> RenderableType:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     sessions = SessionStore()
+    memory_store = MemoryStore()
     console = make_console()
 
     if args.sessions is not None:
@@ -1415,7 +1502,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ветки нельзя напечатать ни панели, ни вопроса, иначе вызывающий получит
     # рамки вместо JSON.
     if args.ask is not None:
-        return one_shot(args, sessions)
+        return one_shot(args, sessions, memory_store)
 
     try:
         record, base = choose_base(args, sessions)
@@ -1431,7 +1518,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     enable_line_editing()
     keys = switching.CredentialStore(demo=config.transport.demo, ask_keys=args.ask_keys)
     try:
-        agent = prepare_agent(console, args, sessions, keys, record, config)
+        agent = prepare_agent(console, args, sessions, keys, record, config,
+                              memory_store)
     except (ConfigError, AgentError) as exc:
         console.print(error_panel(str(exc)))
         return 2
@@ -1445,5 +1533,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Время прочитанной записи запоминаем: по нему потом видно, не изменил ли
     # эту сессию кто-то ещё, пока мы разговаривали.
     live.seen_at = record.updated_at if record is not None else time.time()
-    chat_loop(console, keys, live, sessions=None if args.no_save else sessions)
+    chat_loop(console, keys, live, sessions=None if args.no_save else sessions,
+              memory_store=memory_store)
     return 0

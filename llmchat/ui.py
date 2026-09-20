@@ -921,6 +921,7 @@ COMMANDS: List[tuple] = [
     ("/strategy", "как собирается запрос: full, window, facts, summary; "
                   "без аргументов — сравнение стратегий"),
     ("/facts", "картотека важных сведений разговора; её можно поправить руками"),
+    ("/memory", "три явных слоя: диалог, данные задачи, профиль и память проекта"),
     ("/checkpoint", "запомнить место в разговоре, от которого можно отвести ветку"),
     ("/branch", "отвести ветку от точки возврата и продолжать разговор в ней"),
     ("/branches", "список веток и точек возврата"),
@@ -949,6 +950,9 @@ COMBINE_HINTS: List[tuple] = [
     ("/change_model openai gpt-5.5", "если имя есть у нескольких провайдеров"),
     ("/strategy facts", "перейти на память фактов: в модель уйдут факты и хвост"),
     ("/facts срок=к 1 марта", "записать факт руками; /facts срок= — забыть его"),
+    ("/memory working срок=к 1 марта", "явно записать данные текущей задачи"),
+    ("/memory long profile language=русский", "сохранить профиль между сессиями"),
+    ("/memory long rules no_push=без явной команды", "сохранить правило проекта"),
     ("/checkpoint выбор-стека", "запомнить место; от него потом отводят ветки"),
     ("/branch вариант-а выбор-стека", "две ветки от одного места: имя и точка"),
 ]
@@ -1024,6 +1028,60 @@ def facts_panel(session: Session, changed: Optional[dict] = None) -> RenderableT
                        style="dim"))
     return Panel(Group(*blocks), title="Факты разговора", title_align="left",
                  border_style="cyan", box=box.ROUNDED, padding=(0, 1))
+
+
+def memory_panel(session: Session, note: str = "") -> RenderableType:
+    """Показать три слоя и границы их жизни в одном месте."""
+    overview = _help_table(title="Слои")
+    overview.add_column("Слой", style="bold", no_wrap=True)
+    overview.add_column("Что хранит")
+    overview.add_column("Срок жизни", style="dim")
+    overview.add_row("short", "{} сообщений текущего диалога".format(len(session.messages)),
+                     "до /new; отдельная ветка — отдельная копия")
+    overview.add_row("working", "{} записей текущей задачи".format(
+        len(session.working_memory)), "до /new; ветвится вместе с задачей")
+    long_count = (len(session.long_term_memory.profile)
+                  + len(session.long_term_memory.rules)
+                  + len(session.long_term_memory.decisions)
+                  + len(session.long_term_memory.knowledge))
+    overview.add_row("long", "{} записей профиля и проекта".format(long_count),
+                     "между сессиями; проектные записи изолированы")
+
+    blocks: List[RenderableType] = []
+    if note:
+        blocks.append(Text(note, style="green"))
+    blocks.append(overview)
+    if session.working_memory:
+        blocks.append(_memory_items("Рабочая память", session.working_memory))
+
+    long_rows = []
+    memory = session.long_term_memory
+    for section in ("profile", "rules", "decisions", "knowledge"):
+        long_rows += [(section, key, value) for key, value in getattr(memory, section).items()]
+    if long_rows:
+        table = _help_table(title="Долговременная память")
+        table.add_column("Раздел", style="bold magenta", no_wrap=True)
+        table.add_column("Ключ", style="bold cyan", no_wrap=True)
+        table.add_column("Значение")
+        for section, key, value in long_rows:
+            table.add_row(section, key, value)
+        blocks.append(table)
+    blocks.append(Text(
+        "Обычная реплика → short · /memory working ключ=значение · "
+        "/memory long profile|rules|decisions|knowledge ключ=значение · "
+        "пустое значение забывает запись",
+        style="dim"))
+    return Panel(Group(*blocks), title="Память агента", title_align="left",
+                 border_style="bright_magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def _memory_items(title: str, items) -> Table:
+    table = _help_table(title=title)
+    table.add_column("Ключ", style="bold cyan", no_wrap=True)
+    table.add_column("Значение")
+    for key, value in items.items():
+        table.add_row(key, value)
+    return table
 
 
 def branches_panel(session: Session, note: str = "") -> RenderableType:

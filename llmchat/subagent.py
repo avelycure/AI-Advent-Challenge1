@@ -195,7 +195,10 @@ def run(name: str, question: str, parent: AgentConfig,
         command.append("--demo")
 
     try:
-        finished = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True,
+        # Наследуем cwd родителя: project-scoped long-memory определяется по
+        # проекту пользователя, а не по репозиторию, где установлен сам agent.
+        # ENTRY_POINT и config абсолютные, поэтому смена cwd для импорта не нужна.
+        finished = subprocess.run(command, capture_output=True, text=True,
                                   timeout=TIMEOUT_SECONDS,
                                   env=child_environment(parent, child))
     except subprocess.TimeoutExpired:

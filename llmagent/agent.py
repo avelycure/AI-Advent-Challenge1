@@ -28,6 +28,7 @@ from .errors import (
     OutputRejected,
 )
 from .history import Conversation, Message
+from .memory import LONG_TERM, SHORT_TERM, WORKING, LongTermMemory, WorkingMemory
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .tools import Toolbox, ToolOutcome
@@ -65,7 +66,8 @@ class Agent:
     def __init__(self, config: AgentConfig = DEFAULT_CONFIG, *,
                  registry: Optional[ClientRegistry] = None, client: Any = None,
                  session_id: Optional[str] = None,
-                 toolbox: Optional[Toolbox] = None) -> None:
+                 toolbox: Optional[Toolbox] = None,
+                 long_term_memory: Optional[LongTermMemory] = None) -> None:
         # Проверяем конфиг сразу: неверный провайдер должен обнаружиться при
         # создании агента, а не на первом запросе где-то в глубине транспорта.
         config.resolve()
@@ -81,6 +83,9 @@ class Agent:
         # Ветки разговора. Их всегда хотя бы одна, и пока она одна, ветвление
         # ничем себя не проявляет: ``conversation`` — переписка активной ветки.
         self.branches = Branches()
+        # Этот слой общий для ветвей и переживает /new. Файловое хранилище
+        # внедряет вызывающий: агент не зависит от cwd и домашнего каталога.
+        self.long_term_memory = long_term_memory or LongTermMemory()
         self._sync_context()
         # Почему сжатие не состоялось в последний раз. Пустая строка — состоялось
         # или не требовалось. Держится здесь, а не поднимается наверх ошибкой:
@@ -114,6 +119,40 @@ class Agent:
     def conversation(self, value: Conversation) -> None:
         self.branches.conversation = value
         self._sync_context()
+
+    @property
+    def working_memory(self) -> WorkingMemory:
+        """Явная память текущей задачи активной ветки."""
+        return self.branches.working_memory
+
+    def remember(self, layer: str, key: str, value: str,
+                 section: str = "") -> bool:
+        """Явно записать значение в выбранный слой; пустое значение удаляет."""
+        if layer == SHORT_TERM:
+            raise AgentError(
+                "краткосрочная память заполняется репликами диалога; "
+                "для явной записи выберите working или long")
+        if layer == WORKING:
+            changed = self.working_memory.remember(key, value)
+            if changed:
+                self.conversation.forget_exact()
+            return changed
+        if layer == LONG_TERM:
+            changed = self.long_term_memory.remember(section, key, value)
+            if changed:
+                for conversation in self.branches.each_conversation():
+                    conversation.forget_exact()
+            return changed
+        raise AgentError("неизвестный слой памяти «{}»; доступны: short, working, long".format(
+            layer))
+
+    def replace_long_term_memory(self, memory: LongTermMemory) -> None:
+        """Принять успешно сохранённый свежий снимок долговременной памяти."""
+        if memory is self.long_term_memory:
+            return
+        self.long_term_memory = memory
+        for conversation in self.branches.each_conversation():
+            conversation.forget_exact()
 
     def _sync_context(self) -> None:
         """Раздать переписке настройки, по которым она собирает запрос.
@@ -262,15 +301,21 @@ class Agent:
 
     def breakdown(self) -> RequestBreakdown:
         """Из чего сложится ближайший запрос и влезет ли он в окно."""
+        if not self._config.history.enabled:
+            conversation = self._plain_conversation()
+            return request_breakdown(conversation, self._system_prompt(),
+                                     self.output_reserve, self.context_limit)
         return request_breakdown(self.conversation, self._system_prompt(),
-                                 self.output_reserve, self.context_limit)
+                                 self.output_reserve, self.context_limit,
+                                 working_message=self.working_memory.prompt_message(),
+                                 long_term_messages=self.long_term_memory.prompt_messages())
 
     def growth(self) -> List[Step]:
         """Во что обошёлся каждый обмен и сколько набежало с начала диалога."""
         return growth(self.conversation)
 
     def context_used(self) -> int:
-        return self.conversation.context_used(self._config.system_prompt)
+        return self.conversation.weigh(self._request_messages())
 
     def free_tokens(self) -> int:
         return max(0, self.input_budget - self.context_used())
@@ -596,6 +641,13 @@ class Agent:
         Вопрос из истории при неудаче не убирается: этот путь для вызывающего,
         который сам положил его туда и сам решает, что делать дальше.
         """
+        if not self._config.history.enabled:
+            # Интерактивный чат кладёт вопрос на экран до запроса и потому
+            # приходит этим методом. При opt-out отправляем только этот вопрос:
+            # ни накопленный экранный диалог, ни working/long, ни служебные
+            # сжатия не должны обращаться к провайдеру.
+            return self._answer(self._request_messages())
+
         # Сжимаем до того, как считать переполнение: пересказ освобождает
         # место, и проверять окно раньше него значило бы отказывать разговору,
         # который на самом деле помещается.
@@ -608,7 +660,7 @@ class Agent:
         # Умещаем диалог до сборки сообщений: обрезать историю после того, как
         # запрос собран, — значит отправить в модель прежний, длинный.
         self.fit_context()
-        return self._answer(self.conversation.api_messages(self._system_prompt()))
+        return self._answer(self._request_messages())
 
     def retry_last(self) -> Optional[AgentResult]:
         """Задать последний вопрос ещё раз — на той модели, что выбрана сейчас.
@@ -619,7 +671,7 @@ class Agent:
         index = self.conversation.last_user_index()
         if index < 0:
             return None
-        messages = self.conversation.api_messages_upto(index, self._system_prompt())
+        messages = self._request_messages_upto(index)
         return self._answer(messages)
 
     def ask_messages(self, messages: List[Dict[str, str]], *, kind: str = MAIN,
@@ -673,6 +725,48 @@ class Agent:
     def _system_prompt(self) -> str:
         return policies.output_system_prompt(self._config.output,
                                              self._config.system_prompt)
+
+    def _memory_messages(self) -> List[Dict[str, str]]:
+        """Долговременная, затем рабочая: текущий слой ближе к вопросу."""
+        if not self._config.history.enabled:
+            return []
+        messages = self.long_term_memory.prompt_messages()
+        working = self.working_memory.prompt_message()
+        if working is not None:
+            messages.append(working)
+        return messages
+
+    def _request_messages(self) -> List[Dict[str, str]]:
+        if not self._config.history.enabled:
+            return self._plain_request()
+        return self.conversation.api_messages(
+            self._system_prompt(), prefix=self._memory_messages())
+
+    def _request_messages_upto(self, index: int) -> List[Dict[str, str]]:
+        if not self._config.history.enabled:
+            return self._plain_request(index)
+        return self.conversation.api_messages_upto(
+            index, self._system_prompt(), prefix=self._memory_messages())
+
+    def _plain_request(self, index: int = -1) -> List[Dict[str, str]]:
+        """Только последний вопрос: путь интерактивного history opt-out."""
+        if index < 0:
+            index = len(self.conversation.messages) - 1
+        for position in range(min(index, len(self.conversation.messages) - 1), -1, -1):
+            message = self.conversation.messages[position]
+            if message.role == "user":
+                return self._plain_messages(message.content)
+        prompt = self._system_prompt()
+        return [{"role": "system", "content": prompt}] if prompt else []
+
+    def _plain_conversation(self) -> Conversation:
+        conversation = Conversation()
+        conversation.scale = self.conversation.scale
+        for message in reversed(self.conversation.messages):
+            if message.role == "user":
+                conversation.add_user(message.content)
+                break
+        return conversation
 
     def _plain_messages(self, text: str) -> List[Dict[str, str]]:
         prompt = self._system_prompt()
@@ -887,7 +981,7 @@ class Agent:
                 self.conversation.note_exchange(
                     completion.prompt_tokens, completion.completion_tokens,
                     estimate=count_message_tokens(
-                        self.conversation.api_messages(self._system_prompt())))
+                        self._request_messages()))
 
         if self._config.judge is not None:
             self._apply_judge(result, question)

@@ -13,7 +13,7 @@ ChatGPT, а отвечает Qwen, GLM или YandexGPT со своим — ра
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .config import FACTS, SUMMARY
 from .history import Conversation
@@ -25,6 +25,9 @@ class RequestBreakdown:
     """Что уйдёт в модель прямо сейчас и влезет ли это в окно."""
 
     system: int
+    # Явные слои памяти, не зависящие от стратегии краткосрочной истории.
+    long_term: int
+    working: int
     # Пересказ сжатого начала: то, что уходит в модель вместо него.
     summary: int
     # Блок фактов: то, что уходит в модель вместо забытого окном начала.
@@ -58,7 +61,8 @@ class RequestBreakdown:
     @property
     def estimated_input(self) -> int:
         """Размер запроса по локальной оценке — без единого обращения к API."""
-        return (self.system + self.summary + self.facts + self.history
+        return (self.system + self.long_term + self.working
+                + self.summary + self.facts + self.history
                 + self.pending + self.overhead)
 
     @property
@@ -106,6 +110,8 @@ class RequestBreakdown:
         """
         named = [
             Part("Системный промпт", self.system),
+            Part("Долговременная память", self.long_term),
+            Part("Рабочая память", self.working),
             Part("Пересказ начала", self.summary),
             Part("Факты разговора", self.facts),
             Part("История диалога", self.history),
@@ -151,7 +157,10 @@ class Step:
 
 
 def request_breakdown(conversation: Conversation, system_prompt: str,
-                      reserve: int, window: int) -> RequestBreakdown:
+                      reserve: int, window: int,
+                      working_message: Optional[Dict[str, str]] = None,
+                      long_term_messages: Optional[List[Dict[str, str]]] = None
+                      ) -> RequestBreakdown:
     """Разложить ближайший запрос на части.
 
     Отвеченным считается всё до последнего вопроса без ответа: именно эта
@@ -172,6 +181,10 @@ def request_breakdown(conversation: Conversation, system_prompt: str,
     sends_facts = conversation.strategy == FACTS and bool(conversation.sent_facts())
     return RequestBreakdown(
         system=(count_text_tokens(system_prompt) + MESSAGE_OVERHEAD) if system_prompt else 0,
+        long_term=count_message_tokens(long_term_messages or []) - count_message_tokens([])
+        if long_term_messages else 0,
+        working=(count_text_tokens(working_message["content"]) + MESSAGE_OVERHEAD)
+        if working_message else 0,
         summary=(count_text_tokens(conversation.summary_message()["content"])
                  + MESSAGE_OVERHEAD) if sends_summary else 0,
         facts=(count_text_tokens(conversation.facts_message()["content"])

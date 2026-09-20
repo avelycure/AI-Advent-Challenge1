@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from .errors import AgentError
 from .history import Conversation
+from .memory import WorkingMemory
 
 # Имя ветки, с которой начинается любой разговор. Она есть всегда, даже когда
 # о ветках никто не спрашивал: так ветвление ничего не меняет в том, как
@@ -38,11 +39,14 @@ class Checkpoint:
     created_at: float = 0.0
     # Снимок переписки на эту минуту: сообщения, пересказ и факты.
     conversation: Conversation = field(default_factory=Conversation)
+    # Рабочая память относится к той же задаче и ветвится вместе с разговором.
+    working_memory: WorkingMemory = field(default_factory=WorkingMemory)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"label": self.label, "branch": self.branch,
                 "messages": self.messages, "created_at": self.created_at,
-                "conversation": self.conversation.to_dict()}
+                "conversation": self.conversation.to_dict(),
+                "working_memory": self.working_memory.to_dict()}
 
     @classmethod
     def restore(cls, payload: Dict[str, Any]) -> "Checkpoint":
@@ -51,7 +55,8 @@ class Checkpoint:
             branch=str(payload.get("branch") or MAIN),
             messages=int(payload.get("messages") or 0),
             created_at=float(payload.get("created_at") or 0.0),
-            conversation=Conversation.restore(payload.get("conversation") or {}))
+            conversation=Conversation.restore(payload.get("conversation") or {}),
+            working_memory=WorkingMemory.restore(payload.get("working_memory") or {}))
 
 
 @dataclass
@@ -60,6 +65,7 @@ class Branch:
 
     name: str
     conversation: Conversation = field(default_factory=Conversation)
+    working_memory: WorkingMemory = field(default_factory=WorkingMemory)
     # От какой ветки и от какой точки отведена. Пусто у основной: она ни от
     # чего не отведена, разговор с неё начался.
     parent: str = ""
@@ -78,13 +84,15 @@ class Branch:
         return {"name": self.name, "parent": self.parent,
                 "checkpoint": self.checkpoint, "inherited": self.inherited,
                 "created_at": self.created_at,
-                "conversation": self.conversation.to_dict()}
+                "conversation": self.conversation.to_dict(),
+                "working_memory": self.working_memory.to_dict()}
 
     @classmethod
     def restore(cls, payload: Dict[str, Any]) -> "Branch":
         return cls(
             name=str(payload.get("name") or MAIN),
             conversation=Conversation.restore(payload.get("conversation") or {}),
+            working_memory=WorkingMemory.restore(payload.get("working_memory") or {}),
             parent=str(payload.get("parent") or ""),
             checkpoint=str(payload.get("checkpoint") or ""),
             inherited=int(payload.get("inherited") or 0),
@@ -94,8 +102,10 @@ class Branch:
 class Branches:
     """Все ветки разговора и точки возврата. Активна ровно одна ветка."""
 
-    def __init__(self, conversation: Optional[Conversation] = None) -> None:
+    def __init__(self, conversation: Optional[Conversation] = None,
+                 working_memory: Optional[WorkingMemory] = None) -> None:
         root = Branch(MAIN, conversation if conversation is not None else Conversation(),
+                      working_memory if working_memory is not None else WorkingMemory(),
                       created_at=time.time())
         self._branches: Dict[str, Branch] = {MAIN: root}
         self._checkpoints: Dict[str, Checkpoint] = {}
@@ -114,6 +124,14 @@ class Branches:
     @conversation.setter
     def conversation(self, value: Conversation) -> None:
         self._branches[self._active].conversation = value
+
+    @property
+    def working_memory(self) -> WorkingMemory:
+        return self._branches[self._active].working_memory
+
+    @working_memory.setter
+    def working_memory(self, value: WorkingMemory) -> None:
+        self._branches[self._active].working_memory = value
 
     @property
     def branched(self) -> bool:
@@ -172,7 +190,8 @@ class Branches:
         conversation = self.conversation
         point = Checkpoint(name, branch=self._active, messages=len(conversation.messages),
                            created_at=time.time(),
-                           conversation=copy.deepcopy(conversation))
+                           conversation=copy.deepcopy(conversation),
+                           working_memory=copy.deepcopy(self.working_memory))
         self._checkpoints[name] = point
         return point
 
@@ -191,6 +210,7 @@ class Branches:
         point = self.checkpoint(label) if label else (
             self.latest_checkpoint() or self.mark())
         branch = Branch(wanted, conversation=copy.deepcopy(point.conversation),
+                        working_memory=copy.deepcopy(point.working_memory),
                         parent=point.branch, checkpoint=point.label,
                         inherited=len(point.conversation.messages),
                         created_at=time.time())
@@ -207,7 +227,8 @@ class Branches:
         """Оставить один разговор без ветвей: так ведёт себя ``/new``."""
         conversation = self.conversation
         conversation.reset()
-        self._branches = {MAIN: Branch(MAIN, conversation, created_at=time.time())}
+        self._branches = {MAIN: Branch(MAIN, conversation, WorkingMemory(),
+                                       created_at=time.time())}
         self._checkpoints = {}
         self._active = MAIN
 
@@ -232,14 +253,15 @@ class Branches:
         }
 
     @classmethod
-    def restore(cls, payload: Dict[str, Any], conversation: Conversation) -> "Branches":
+    def restore(cls, payload: Dict[str, Any], conversation: Conversation,
+                working_memory: Optional[WorkingMemory] = None) -> "Branches":
         """Собрать ветки из сохранённого вида.
 
         ``conversation`` — активная переписка, прочитанная обычным путём. Она
         и остаётся активной веткой: файл мог быть записан версией, которая про
         ветки не знала, и тогда ветка ровно одна.
         """
-        branches = cls(conversation)
+        branches = cls(conversation, working_memory)
         stored = payload.get("branches") if isinstance(payload, dict) else None
         if not stored:
             return branches
@@ -254,6 +276,7 @@ class Branches:
             # измеренное чужой моделью.
             if branch.name == active:
                 branch.conversation = conversation
+                branch.working_memory = working_memory or WorkingMemory()
             restored[branch.name] = branch
         if not restored:
             return branches

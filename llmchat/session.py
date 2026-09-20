@@ -133,6 +133,15 @@ class Session:
     def facts_note(self) -> str:
         return self.agent.facts_note
 
+    # --- явные слои памяти -----------------------------------------------
+    @property
+    def working_memory(self):
+        return self.agent.working_memory.items
+
+    @property
+    def long_term_memory(self):
+        return self.agent.long_term_memory
+
     # --- ветки разговора ---------------------------------------------------
     @property
     def branches(self):
