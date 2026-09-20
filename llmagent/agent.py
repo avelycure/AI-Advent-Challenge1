@@ -32,7 +32,7 @@ from .memory import LONG_TERM, SHORT_TERM, WORKING, LongTermMemory, WorkingMemor
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .tools import Toolbox, ToolOutcome
-from .task_state import TaskState
+from .task_state import AUTOMATIC_CONTROL, TaskState, split_task_directive
 from .transport import (
     Completion,
     ToolCall,
@@ -109,6 +109,9 @@ class Agent:
         # включить прямо в разговоре, и отбирать тогда было бы уже не из чего.
         self._all_tools = toolbox or Toolbox()
         self._toolbox = self._all_tools.only(config.tools.enabled)
+        # Интерактивный Session включает автоматическое ведение этапов.
+        # Библиотечные вызовы сохраняют прежнее поведение до явного включения.
+        self.automatic_task_state = False
 
     # --- переписка и ветки ------------------------------------------------
     @property
@@ -130,6 +133,10 @@ class Agent:
     def task_state(self) -> TaskState:
         """Формализованное состояние задачи активной ветки."""
         return self.branches.task_state
+
+    def enable_task_state_automation(self) -> None:
+        """Поручить модели самой вести этап, шаг и ожидаемое действие."""
+        self.automatic_task_state = True
 
     def start_task(self, current_step: str = "", expected_action: str = "") -> TaskState:
         self.task_state.start(current_step, expected_action)
@@ -675,6 +682,7 @@ class Agent:
         """
         prepared = self.prepare_input(text)
         if not self._config.history.enabled:
+            self._ensure_task_started(prepared)
             return self._answer(self._plain_messages(prepared))
 
         self.conversation.add_user(prepared)
@@ -690,6 +698,7 @@ class Agent:
         Вопрос из истории при неудаче не убирается: этот путь для вызывающего,
         который сам положил его туда и сам решает, что делать дальше.
         """
+        self._ensure_task_started(self._request_text())
         if not self._config.history.enabled:
             # Интерактивный чат кладёт вопрос на экран до запроса и потому
             # приходит этим методом. При opt-out отправляем только этот вопрос:
@@ -772,8 +781,12 @@ class Agent:
         return self.conversation.drop_oldest_exchange()
 
     def _system_prompt(self) -> str:
-        return policies.output_system_prompt(self._config.output,
-                                             self._config.system_prompt)
+        prompt = policies.output_system_prompt(self._config.output,
+                                               self._config.system_prompt)
+        if (self.automatic_task_state and self.task_state.active
+                and not self.task_state.paused):
+            prompt = (prompt + AUTOMATIC_CONTROL) if prompt else AUTOMATIC_CONTROL.strip()
+        return prompt
 
     def _memory_messages(self, request: str = "") -> List[Dict[str, str]]:
         """Долговременная память, рабочая память и состояние задачи."""
@@ -793,6 +806,12 @@ class Agent:
         """Профиль действует и при отключённой истории диалога."""
         message = self.long_term_memory.profile_message(request)
         return [message] if message is not None else []
+
+    def _ensure_task_started(self, request: str) -> None:
+        """Первая обычная реплика сама запускает planning в live-режиме."""
+        if self.automatic_task_state and not self.task_state.active:
+            self.task_state.start_from_request(request)
+            self.conversation.forget_exact()
 
     def _request_text(self, index: int = -1) -> str:
         """Последний пользовательский запрос до заданной позиции."""
@@ -965,6 +984,7 @@ class Agent:
         attempt = 0
         completion = None
         validation = None
+        task_update = None
         dropped: List[str] = []
         notes: List[str] = []
         spent_seconds = 0.0
@@ -993,6 +1013,11 @@ class Agent:
             for note in completion.notes:
                 if note not in notes:
                     notes.append(note)
+
+            if self.automatic_task_state:
+                # Модель возвращает решение автомата рядом с ответом. Наружу
+                # и в проверку формата идёт только содержательная часть.
+                completion.text, task_update = split_task_directive(completion.text)
 
             validation = policies.check_output(policy, completion.text,
                                                completion.finish_reason)
@@ -1053,6 +1078,14 @@ class Agent:
                     completion.prompt_tokens, completion.completion_tokens,
                     estimate=count_message_tokens(
                         self._request_messages()))
+
+        if self.automatic_task_state and task_update is not None:
+            # Неверный переход не ломает уже полученный ответ: автомат просто
+            # остаётся на прежнем этапе и попробует снова на следующем ходе.
+            # Переход делается после учёта контекста, чтобы забыть измерение,
+            # снятое со старым состоянием, и не выдавать его за новое.
+            if self.task_state.absorb_model_update(task_update):
+                self.conversation.forget_exact()
 
         if self._config.judge is not None:
             self._apply_judge(result, question)

@@ -23,6 +23,9 @@ class Session:
     def __init__(self, agent: Agent, topic: str = DEFAULT_TOPIC,
                  title: str = "") -> None:
         self.agent = agent
+        # Пользователь формулирует задачу обычной репликой; planning и
+        # дальнейшие переходы ведёт сама модель.
+        self.agent.enable_task_state_automation()
         self.topic = topic
         # Имя сессии — то, по которому человек её узнаёт в списке. Пустое
         # означает «придумай сам»: имя выводится из темы или первого вопроса.

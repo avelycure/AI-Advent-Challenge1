@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import random
 import re
 import time
@@ -633,6 +634,31 @@ class DemoClient:
             text = DEMO_REPLIES[self._counter % len(DEMO_REPLIES)]
             text = "Вы спросили: «{}».\n\n{}".format(last_user[:120], text)
             self._counter += 1
+            controller = next((
+                m.get("content", "") for m in messages
+                if "Ты сам управляешь конечным автоматом" in m.get("content", "")), "")
+            if controller:
+                state_message = next((
+                    m.get("content", "") for m in messages
+                    if "Формализованное состояние текущей задачи" in
+                    m.get("content", "")), "")
+                found = re.search(r"Этап:\s*(planning|execution|validation|done)",
+                                  state_message)
+                current = found.group(1) if found else "planning"
+                updates = {
+                    "planning": ("execution", "Выполнить задачу пользователя",
+                                 "Перейти к проверке результата"),
+                    "execution": ("validation", "Проверить выполненную работу",
+                                  "Подтвердить корректность результата"),
+                    "validation": ("done", "Задача выполнена и проверена",
+                                   "Сообщить итог пользователю"),
+                    "done": ("done", "Задача завершена", "Действий не требуется"),
+                }
+                stage, step, expected = updates[current]
+                directive = {"stage": stage, "current_step": step,
+                             "expected_action": expected, "paused": False}
+                text += "\n\n[[TASK_STATE {}]]".format(
+                    json.dumps(directive, ensure_ascii=False, separators=(",", ":")))
         return Completion(
             text=text,
             prompt_tokens=count_message_tokens(messages),

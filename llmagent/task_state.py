@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .errors import AgentError
 
@@ -27,6 +29,21 @@ NEXT_STAGE = {
 TASK_STATE_PREFIX = (
     "Формализованное состояние текущей задачи. Используй его как источник "
     "истины: не проси повторно цель и уже сохранённый контекст.\n\n"
+)
+
+TASK_STATE_PATTERN = re.compile(
+    r"\s*\[\[TASK_STATE\s+(\{.*?\})\s*\]\]\s*$", re.DOTALL)
+AUTOMATIC_CONTROL = (
+    "\n\nТы сам управляешь конечным автоматом этой задачи. После содержательного "
+    "ответа обязательно добавь последней строкой служебную директиву строго "
+    "такого вида (она будет скрыта от пользователя):\n"
+    '[[TASK_STATE {"stage":"execution","current_step":"что делать теперь",'
+    '"expected_action":"следующее действие","paused":false}]]\n'
+    "stage должен остаться текущим или перейти ровно на один следующий этап: "
+    "planning → execution → validation → done. Не пропускай этапы. "
+    "current_step описывает актуальный шаг после твоего ответа, а "
+    "expected_action — конкретное действие следующим. paused=true ставь, "
+    "только если без ответа или решения пользователя продолжать нельзя."
 )
 
 
@@ -70,6 +87,14 @@ class TaskState:
         self.paused = False
         self.active = True
 
+    def start_from_request(self, request: str) -> None:
+        """Автоматически принять первую реплику как новую задачу."""
+        task = _clean(request)
+        if len(task) > 240:
+            task = task[:237].rstrip() + "…"
+        self.start(task or "Определить задачу",
+                   "Составить план и приступить к выполнению")
+
     def update(self, current_step: Optional[str] = None,
                expected_action: Optional[str] = None) -> None:
         """Уточнить шаг внутри этапа, не выполняя переход."""
@@ -86,7 +111,7 @@ class TaskState:
         wanted = _clean(stage).lower()
         if self.paused:
             raise AgentError("задача на паузе; сначала продолжите её")
-        allowed = (self.stage, self.next_stage)
+        allowed = (self.stage, self.next_stage) if self.next_stage else (self.stage,)
         if wanted not in allowed:
             if not self.next_stage:
                 raise AgentError("этап done завершающий; начните новую задачу")
@@ -145,6 +170,22 @@ class TaskState:
             lines.append("Продолжай с этого места без повторного сбора уже известных данных.")
         return {"role": "user", "content": TASK_STATE_PREFIX + "\n".join(lines)}
 
+    def absorb_model_update(self, payload: Dict[str, Any]) -> bool:
+        """Принять решение модели, только если оно соблюдает автомат."""
+        if not self.active or self.paused or not isinstance(payload, dict):
+            return False
+        wanted = _clean(payload.get("stage")).lower()
+        allowed = (self.stage, self.next_stage) if self.next_stage else (self.stage,)
+        if wanted not in allowed:
+            return False
+        step = _clean(payload.get("current_step"))
+        expected = _clean(payload.get("expected_action"))
+        self.transition(wanted, step or self.current_step,
+                        expected or self.expected_action)
+        if payload.get("paused") is True:
+            self.pause()
+        return True
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "active": self.active,
@@ -172,3 +213,16 @@ class TaskState:
     def _require_active(self) -> None:
         if not self.active:
             raise AgentError("текущая задача не начата")
+
+
+def split_task_directive(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Снять служебную директиву с конца ответа и разобрать её JSON."""
+    match = TASK_STATE_PATTERN.search(text or "")
+    if match is None:
+        return (text or "").strip(), None
+    visible = (text or "")[:match.start()].strip()
+    try:
+        payload = json.loads(match.group(1))
+    except (TypeError, ValueError):
+        return (text or "").strip(), None
+    return visible, payload if isinstance(payload, dict) else None

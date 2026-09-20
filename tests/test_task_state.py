@@ -16,12 +16,23 @@ from llmagent import (
     Transport,
     restore_agent,
 )
+from llmagent.task_state import split_task_directive
 
 from conftest import ScriptedClient
 from llmchat.app import handle_task, pause_task, resume_task
 from llmchat.session import Session
 
 FAST = Transport(demo=True, demo_delay=0.0)
+
+
+def answer_with_state(text, stage, step, expected, paused=False):
+    return (
+        text + "\n\n[[TASK_STATE "
+        + '{{"stage":"{}","current_step":"{}","expected_action":"{}",'
+          '"paused":{}}}'.format(
+              stage, step, expected, str(paused).lower())
+        + "]]"
+    )
 
 
 def agent_with(*answers, history=True):
@@ -150,3 +161,75 @@ def test_chat_commands_control_the_same_state_machine():
     assert not session.task_state.paused
     assert session.task_state.current_step == "Написать код"
     assert session.task_state.expected_action == "Запустить тесты"
+
+
+def test_a_plain_user_task_starts_and_advances_the_machine_automatically():
+    client = ScriptedClient([
+        answer_with_state("План готов.", EXECUTION, "Реализовать калькулятор",
+                          "Запустить тесты"),
+        answer_with_state("Код готов.", VALIDATION, "Проверить операции",
+                          "Подтвердить результат"),
+    ])
+    session = Session(Agent(AgentConfig(transport=FAST), client=client))
+
+    first = session.agent.ask(
+        "Создай калькулятор с четырьмя операциями и обработкой деления на ноль")
+    assert first.text == "План готов."
+    assert session.task_state.stage == EXECUTION
+    assert session.task_state.current_step == "Реализовать калькулятор"
+    assert "TASK_STATE" not in first.text
+
+    second = session.agent.ask("Продолжай")
+    assert second.text == "Код готов."
+    assert session.task_state.stage == VALIDATION
+    assert session.task_state.expected_action == "Подтвердить результат"
+
+
+def test_the_model_cannot_skip_a_stage_while_controlling_the_machine():
+    client = ScriptedClient(answer_with_state(
+        "Попытка готова.", VALIDATION, "Проверить", "Завершить"))
+    session = Session(Agent(AgentConfig(transport=FAST), client=client))
+    session.agent.ask("Создай калькулятор")
+    assert session.task_state.stage == PLANNING
+
+
+def test_the_model_can_pause_on_any_current_stage():
+    client = ScriptedClient(answer_with_state(
+        "Нужно выбрать формат ввода.", PLANNING,
+        "Уточнить формат ввода", "Получить решение пользователя", paused=True))
+    session = Session(Agent(AgentConfig(transport=FAST), client=client))
+    session.agent.ask("Создай калькулятор")
+    assert session.task_state.stage == PLANNING
+    assert session.task_state.paused
+    assert session.task_state.expected_action == "Получить решение пользователя"
+
+
+def test_task_directive_parser_leaves_an_invalid_tail_visible():
+    visible, state = split_task_directive("Ответ\n[[TASK_STATE не-json]]")
+    assert visible.endswith("[[TASK_STATE не-json]]")
+    assert state is None
+
+
+def test_automatic_task_resumes_from_disk_without_repeating_requirements(tmp_path):
+    first_client = ScriptedClient(answer_with_state(
+        "План готов.", EXECUTION, "Реализовать калькулятор", "Запустить тесты"))
+    session = Session(Agent(AgentConfig(transport=FAST), client=first_client))
+    requirement = "Создай калькулятор с четырьмя операциями и делением на ноль"
+    session.agent.ask(requirement)
+    session.agent.pause_task()
+
+    store = SessionStore(str(tmp_path))
+    saved = store.save(session.agent, title="калькулятор")
+    continued_client = ScriptedClient(answer_with_state(
+        "Реализация готова.", VALIDATION, "Проверить операции", "Завершить"))
+    returned = restore_agent(
+        store.load(saved.session_id), session.agent.config, client=continued_client)
+    continued = Session(returned)
+    continued.agent.resume_task()
+    continued.agent.ask("Продолжай")
+
+    sent = "\n".join(message["content"] for message in continued_client.calls[0])
+    assert requirement in sent
+    assert "Этап: execution" in sent
+    assert "Текущий шаг: Реализовать калькулятор" in sent
+    assert continued.task_state.stage == VALIDATION
