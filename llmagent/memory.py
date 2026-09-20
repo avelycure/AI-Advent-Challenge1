@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .errors import AgentError
+from .profile import PROFILE_PROMPT, UserProfile
 
 
 SHORT_TERM = "short"
@@ -52,10 +53,8 @@ WORKING_PREFIX = (
     "Рабочая память текущей задачи. Это явно сохранённые цель, ограничения, "
     "промежуточные данные и открытые вопросы. Учитывай их в ответе:\n\n"
 )
-PROFILE_PREFIX = (
-    "Долговременная память: профиль пользователя. Учитывай обращение, язык и "
-    "стиль общения:\n\n"
-)
+# Старое публичное имя оставлено для совместимости импортов и расширений.
+PROFILE_PREFIX = PROFILE_PROMPT
 PROJECT_PREFIX = (
     "Долговременная память этого проекта. Соблюдай правила и запреты, учитывай "
     "принятые решения и устойчивые знания:\n\n"
@@ -129,7 +128,7 @@ class WorkingMemory:
 class LongTermMemory:
     """Профиль пользователя и память конкретного проекта между сессиями."""
 
-    profile: Dict[str, str] = field(default_factory=dict)
+    profile: UserProfile = field(default_factory=UserProfile)
     rules: Dict[str, str] = field(default_factory=dict)
     decisions: Dict[str, str] = field(default_factory=dict)
     knowledge: Dict[str, str] = field(default_factory=dict)
@@ -138,7 +137,8 @@ class LongTermMemory:
     project_revision: int = 0
 
     def __post_init__(self) -> None:
-        for name in LONG_TERM_SECTIONS:
+        self.profile = UserProfile(_strings(self.profile))
+        for name in (RULES, DECISIONS, KNOWLEDGE):
             setattr(self, name, _strings(getattr(self, name)))
 
     def section(self, name: str) -> Dict[str, str]:
@@ -167,11 +167,16 @@ class LongTermMemory:
             raise AgentError("надо назвать ключ, который следует забыть")
         return self.section(section).pop(name, None) is not None
 
-    def prompt_messages(self) -> List[Dict[str, str]]:
+    def profile_message(self, request: str = "") -> Optional[Dict[str, str]]:
+        # Фильтруем ещё раз на границе промпта: даже прямое изменение mapping
+        # в обход remember() не должно протащить секрет в запрос.
+        return UserProfile(_strings(self.profile)).prompt_message(request)
+
+    def prompt_messages(self, request: str = "") -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []
-        profile = _strings(self.profile)
-        if profile:
-            messages.append({"role": "user", "content": PROFILE_PREFIX + _block(profile)})
+        profile = self.profile_message(request)
+        if profile is not None:
+            messages.append(profile)
         project = []
         for section in (RULES, DECISIONS, KNOWLEDGE):
             items = _strings(self.section(section))
@@ -323,6 +328,8 @@ class MemoryStore:
 
 
 def _strings(payload: Any) -> Dict[str, str]:
+    if isinstance(payload, UserProfile):
+        payload = payload.to_dict()
     if not isinstance(payload, dict):
         return {}
     return {_clean_key(key): _clean_value(value) for key, value in payload.items()

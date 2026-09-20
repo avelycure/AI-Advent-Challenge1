@@ -54,6 +54,7 @@ from .memory import (
     MemoryStore,
     WorkingMemory,
 )
+from .profile import UserProfile
 from .params import GenerationParams
 from .catalog import find_model
 from .overrides import append_system_prompt
@@ -76,7 +77,7 @@ __all__ = [
     "GenerationParams", "Schema", "Field", "Check", "Validation",
     "FORMATS", "FREE_FORMAT", "STOP_MARKER",
     "Conversation", "Message", "UsageMeter", "RequestBreakdown", "Step",
-    "WorkingMemory", "LongTermMemory", "MemoryStore",
+    "WorkingMemory", "LongTermMemory", "MemoryStore", "UserProfile",
     "SHORT_TERM", "WORKING", "LONG_TERM", "PROFILE", "RULES", "DECISIONS",
     "KNOWLEDGE", "LONG_TERM_SECTIONS",
     "ClientRegistry", "Credentials", "SHARED", "resolve_credentials",

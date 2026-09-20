@@ -301,14 +301,17 @@ class Agent:
 
     def breakdown(self) -> RequestBreakdown:
         """Из чего сложится ближайший запрос и влезет ли он в окно."""
+        request = self._request_text()
         if not self._config.history.enabled:
             conversation = self._plain_conversation()
             return request_breakdown(conversation, self._system_prompt(),
-                                     self.output_reserve, self.context_limit)
+                                     self.output_reserve, self.context_limit,
+                                     long_term_messages=self._profile_messages(request))
         return request_breakdown(self.conversation, self._system_prompt(),
                                  self.output_reserve, self.context_limit,
                                  working_message=self.working_memory.prompt_message(),
-                                 long_term_messages=self.long_term_memory.prompt_messages())
+                                 long_term_messages=
+                                 self.long_term_memory.prompt_messages(request))
 
     def growth(self) -> List[Step]:
         """Во что обошёлся каждый обмен и сколько набежало с начала диалога."""
@@ -644,8 +647,8 @@ class Agent:
         if not self._config.history.enabled:
             # Интерактивный чат кладёт вопрос на экран до запроса и потому
             # приходит этим методом. При opt-out отправляем только этот вопрос:
-            # ни накопленный экранный диалог, ни working/long, ни служебные
-            # сжатия не должны обращаться к провайдеру.
+            # ни накопленный диалог, ни working/project-memory, ни служебные
+            # сжатия не уходят провайдеру. Профиль пользователя остаётся.
             return self._answer(self._request_messages())
 
         # Сжимаем до того, как считать переполнение: пересказ освобождает
@@ -726,27 +729,44 @@ class Agent:
         return policies.output_system_prompt(self._config.output,
                                              self._config.system_prompt)
 
-    def _memory_messages(self) -> List[Dict[str, str]]:
+    def _memory_messages(self, request: str = "") -> List[Dict[str, str]]:
         """Долговременная, затем рабочая: текущий слой ближе к вопросу."""
         if not self._config.history.enabled:
-            return []
-        messages = self.long_term_memory.prompt_messages()
+            return self._profile_messages(request)
+        messages = self.long_term_memory.prompt_messages(request)
         working = self.working_memory.prompt_message()
         if working is not None:
             messages.append(working)
         return messages
 
+    def _profile_messages(self, request: str) -> List[Dict[str, str]]:
+        """Профиль действует и при отключённой истории диалога."""
+        message = self.long_term_memory.profile_message(request)
+        return [message] if message is not None else []
+
+    def _request_text(self, index: int = -1) -> str:
+        """Последний пользовательский запрос до заданной позиции."""
+        if index < 0:
+            index = len(self.conversation.messages) - 1
+        for position in range(min(index, len(self.conversation.messages) - 1), -1, -1):
+            message = self.conversation.messages[position]
+            if message.role == "user":
+                return message.content
+        return ""
+
     def _request_messages(self) -> List[Dict[str, str]]:
         if not self._config.history.enabled:
             return self._plain_request()
+        request = self._request_text()
         return self.conversation.api_messages(
-            self._system_prompt(), prefix=self._memory_messages())
+            self._system_prompt(), prefix=self._memory_messages(request))
 
     def _request_messages_upto(self, index: int) -> List[Dict[str, str]]:
         if not self._config.history.enabled:
             return self._plain_request(index)
+        request = self._request_text(index)
         return self.conversation.api_messages_upto(
-            index, self._system_prompt(), prefix=self._memory_messages())
+            index, self._system_prompt(), prefix=self._memory_messages(request))
 
     def _plain_request(self, index: int = -1) -> List[Dict[str, str]]:
         """Только последний вопрос: путь интерактивного history opt-out."""
@@ -771,6 +791,7 @@ class Agent:
     def _plain_messages(self, text: str) -> List[Dict[str, str]]:
         prompt = self._system_prompt()
         messages = [{"role": "system", "content": prompt}] if prompt else []
+        messages.extend(self._profile_messages(text))
         messages.append({"role": "user", "content": text})
         return messages
 

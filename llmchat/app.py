@@ -131,7 +131,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     tune.add_argument("--max-cost", type=float, metavar="СУММА",
                       help="потолок трат за сессию")
     tune.add_argument("--no-history", action="store_true",
-                      help="отвечать без памяти: каждый вопрос сам по себе")
+                      help="без истории диалога; профиль пользователя сохраняется")
     tune.add_argument("--strategy", metavar="ВИД", choices=STRATEGIES,
                       help="как собирается запрос: {} (по умолчанию {})".format(
                           ", ".join(STRATEGIES), STRATEGY_SUMMARY))
@@ -509,6 +509,10 @@ def chat_loop(console: Console, keys, session: Session,
                 notice = handle_memory(session, argument, memory_store)
                 remember()
                 continue
+            if command in ("/profile", "/persona"):
+                notice = handle_profile(session, argument, memory_store)
+                remember()
+                continue
             if command in ("/checkpoint", "/point"):
                 notice = mark_checkpoint(session, argument)
                 remember()
@@ -837,6 +841,15 @@ def handle_memory(session: Session, argument: str,
                 words[0]))
     except (AgentError, OSError) as exc:
         return error_panel(str(exc))
+
+
+def handle_profile(session: Session, argument: str,
+                   store: Optional[MemoryStore] = None) -> RenderableType:
+    """Показать или изменить профиль без длинного префикса /memory long."""
+    assignment = argument.strip()
+    if not assignment:
+        return memory_panel(session)
+    return handle_memory(session, "long profile " + assignment, store)
 
 
 def _memory_assignment(text: str):

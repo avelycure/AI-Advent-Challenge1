@@ -329,7 +329,7 @@ def test_restored_or_directly_mutated_secrets_never_reach_a_prompt(tmp_path):
     assert "язык: русский" in prompt
 
 
-def test_no_history_interactive_path_sends_no_memory_or_previous_questions():
+def test_no_history_sends_profile_but_no_task_memory_or_previous_questions():
     client = ScriptedClient(["первый", "второй"])
     config = AgentConfig(name="memory-test", system_prompt="Система.",
                          history=HistoryConfig(enabled=False), transport=FAST_DEMO)
@@ -342,12 +342,15 @@ def test_no_history_interactive_path_sends_no_memory_or_previous_questions():
     agent.conversation.add_user("второй вопрос")
     agent.answer_pending()
 
-    assert [message["content"] for message in client.calls[0]] == [
-        "Система.", "первый вопрос"]
-    assert [message["content"] for message in client.calls[1]] == [
-        "Система.", "второй вопрос"]
+    first = [message["content"] for message in client.calls[0]]
+    second = [message["content"] for message in client.calls[1]]
+    assert first[0] == "Система." and first[-1] == "первый вопрос"
+    assert second[0] == "Система." and second[-1] == "второй вопрос"
+    assert "обращение: Иван" in first[1]
+    assert "обращение: Иван" in second[1]
+    assert all("релиз" not in str(call) for call in client.calls)
     breakdown = agent.breakdown()
-    assert breakdown.long_term == 0 and breakdown.working == 0
+    assert breakdown.long_term > 0 and breakdown.working == 0
 
 
 def test_subagent_inherits_the_calling_project_directory(tmp_path, monkeypatch):
