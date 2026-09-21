@@ -1146,6 +1146,12 @@ def answer_notice(session: Session, result) -> Optional[RenderableType]:
             "Конфликт с инвариантами: {}. Решение не было выдано.".format(
                 identifiers or "неизвестно"),
             title="Инварианты", style="yellow")
+    if result.detected_invariants:
+        lines = ["Распознаны и сохранены строгие правила:"]
+        lines.extend("• {} — {}".format(item["id"], item["rule"])
+                     for item in result.detected_invariants)
+        lines.append("Проверить или изменить: /invariant")
+        return info_panel("\n".join(lines), title="Инварианты", style="yellow")
     if result.validation is not None and not result.validation.ok:
         return warning_panel(
             "Ответ не прошёл выходную политику за {} {}: {}.".format(

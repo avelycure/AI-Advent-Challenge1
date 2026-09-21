@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import compression
 from . import facts as recording
@@ -212,7 +212,8 @@ class Agent:
         else:
             current.append(item)
         policy = guarding.InvariantConfig(
-            rules=tuple(current), max_tokens=self._config.invariants.max_tokens)
+            rules=tuple(current), max_tokens=self._config.invariants.max_tokens,
+            auto_detect=self._config.invariants.auto_detect)
         self.reconfigure(invariants=policy)
         return True
 
@@ -224,7 +225,8 @@ class Agent:
         if len(current) == len(self._config.invariants.rules):
             return False
         policy = guarding.InvariantConfig(
-            rules=current, max_tokens=self._config.invariants.max_tokens)
+            rules=current, max_tokens=self._config.invariants.max_tokens,
+            auto_detect=self._config.invariants.auto_detect)
         self.reconfigure(invariants=policy)
         return True
 
@@ -233,7 +235,8 @@ class Agent:
         removed = len(self._config.invariants.rules)
         if removed:
             self.reconfigure(invariants=guarding.InvariantConfig(
-                max_tokens=self._config.invariants.max_tokens))
+                max_tokens=self._config.invariants.max_tokens,
+                auto_detect=self._config.invariants.auto_detect))
         return removed
 
     def remember(self, layer: str, key: str, value: str,
@@ -747,11 +750,18 @@ class Agent:
         """
         prepared = self.prepare_input(text)
         if not self._config.history.enabled:
-            refusal, request_review = self._preflight_invariants(prepared)
+            detected, discovery_review, declaration_only = self._discover_invariants(
+                prepared)
+            if declaration_only:
+                return self._invariant_acknowledgement(detected, discovery_review)
+            refusal, request_review = self._preflight_invariants(
+                prepared, discovery_review, detected)
             if refusal is not None:
                 return refusal
             self._ensure_task_started(prepared)
-            return self._answer(self._plain_messages(prepared), request_review)
+            return self._answer(
+                self._plain_messages(prepared), request_review,
+                discovery_review, detected)
 
         self.conversation.add_user(prepared)
         try:
@@ -767,7 +777,11 @@ class Agent:
         который сам положил его туда и сам решает, что делать дальше.
         """
         question = self._request_text()
-        refusal, request_review = self._preflight_invariants(question)
+        detected, discovery_review, declaration_only = self._discover_invariants(question)
+        if declaration_only:
+            return self._invariant_acknowledgement(detected, discovery_review)
+        refusal, request_review = self._preflight_invariants(
+            question, discovery_review, detected)
         if refusal is not None:
             return refusal
         self._ensure_task_started(question)
@@ -776,7 +790,8 @@ class Agent:
             # приходит этим методом. При opt-out отправляем только этот вопрос:
             # ни накопленный диалог, ни working/project-memory, ни служебные
             # сжатия не уходят провайдеру. Профиль пользователя остаётся.
-            return self._answer(self._request_messages(), request_review)
+            return self._answer(
+                self._request_messages(), request_review, discovery_review, detected)
 
         # Сжимаем до того, как считать переполнение: пересказ освобождает
         # место, и проверять окно раньше него значило бы отказывать разговору,
@@ -790,7 +805,8 @@ class Agent:
         # Умещаем диалог до сборки сообщений: обрезать историю после того, как
         # запрос собран, — значит отправить в модель прежний, длинный.
         self.fit_context()
-        return self._answer(self._request_messages(), request_review)
+        return self._answer(
+            self._request_messages(), request_review, discovery_review, detected)
 
     def retry_last(self) -> Optional[AgentResult]:
         """Задать последний вопрос ещё раз — на той модели, что выбрана сейчас.
@@ -1072,7 +1088,9 @@ class Agent:
             kind=SUB, requests=int(spent.get("requests", 1) or 1))
 
     def _answer(self, messages: List[Dict[str, str]],
-                request_review: Optional[Completion] = None) -> AgentResult:
+                request_review: Optional[Completion] = None,
+                discovery_review: Optional[Completion] = None,
+                detected_invariants: Tuple[guarding.Invariant, ...] = ()) -> AgentResult:
         """Спросить модель и, если форма не соблюдена, переспросить."""
         policy = self._config.output
         provider, model = self._config.resolve()
@@ -1082,9 +1100,14 @@ class Agent:
         question = next((m["content"] for m in reversed(messages)
                          if m["role"] == "user"), "")
 
-        invariant_checks: List[Dict[str, str]] = (
-            [{"phase": "request", "status": "allowed"}]
-            if request_review is not None else [])
+        invariant_checks: List[Dict[str, str]] = []
+        if discovery_review is not None:
+            invariant_checks.append({
+                "phase": "discovery",
+                "status": "saved" if detected_invariants else "none",
+            })
+        if request_review is not None:
+            invariant_checks.append({"phase": "request", "status": "allowed"})
 
         attempt = 0
         completion = None
@@ -1141,6 +1164,12 @@ class Agent:
         reasoning_tokens += int(tool_spent.get("reasoning_tokens", 0))
         spent_seconds += tool_spent.get("seconds", 0.0)
         cost = _add(cost, tool_spent.get("cost"))
+        if discovery_review is not None:
+            spent_seconds += discovery_review.elapsed
+            prompt_tokens += discovery_review.prompt_tokens
+            completion_tokens += discovery_review.completion_tokens
+            reasoning_tokens += discovery_review.reasoning_tokens
+            cost = _add(cost, discovery_review.cost)
         if request_review is not None:
             # Ранняя проверка совместимого запроса тоже часть пути этого
             # ответа. UsageMeter уже учёл её отдельной строкой, а здесь она
@@ -1202,6 +1231,7 @@ class Agent:
             cost=cost, currency=model.currency, tool_calls=invocations,
             refused=refused, invariant_violations=invariant_violations,
             invariant_checks=invariant_checks,
+            detected_invariants=[item.to_dict() for item in detected_invariants],
         )
 
         if self._config.history.enabled:
@@ -1244,21 +1274,31 @@ class Agent:
             temperature=0.0, stop=[], response_format={})
         return guarding.parse_decision(completion.text, self._config.invariants), completion
 
-    def _preflight_invariants(self, question: str):
-        """Проверить запрос до запуска задачи и обслуживания её памяти."""
-        if not self._config.invariants.enabled:
-            return None, None
-        decision, completion = self._review_invariants(question)
-        if decision.allowed:
-            return None, completion
-        checks = [{"phase": "request", "status": "refused"}]
-        return self._invariant_refusal(decision, completion, checks), None
+    def _discover_invariants(self, question: str):
+        """Извлечь явно объявленные правила и применить их до ответа."""
+        config = self._config.invariants
+        if not guarding.might_declare(question, config):
+            return (), None, False
+        completion = self._call(
+            guarding.discovery_messages(config, question),
+            kind=INVARIANTS, max_tokens=config.max_tokens,
+            temperature=0.0, stop=[], response_format={})
+        discovery = guarding.parse_discovery(completion.text)
+        for item in discovery.invariants:
+            self.set_invariant(item.id, item.category, item.rule, item.reason)
+        return discovery.invariants, completion, discovery.declaration_only
 
-    def _invariant_refusal(self, decision, completion,
-                           checks: List[Dict[str, str]]) -> AgentResult:
-        """Вернуть объяснённый отказ, не запуская основную генерацию."""
+    def _invariant_acknowledgement(self,
+                                   detected: Tuple[guarding.Invariant, ...],
+                                   completion: Completion) -> AgentResult:
+        """Подтвердить чистую декларацию, не превращая её в задачу автомата."""
         provider, model = self._config.resolve()
-        text = guarding.refusal_text(decision.violations)
+        lines = ["Зафиксировал {}:".format(
+            "инвариант" if len(detected) == 1 else "инварианты")]
+        lines.extend("- `{}`: {}".format(item.id, item.rule) for item in detected)
+        lines.append("Буду учитывать {} во всех следующих решениях.".format(
+            "его" if len(detected) == 1 else "их"))
+        text = "\n".join(lines)
         result = AgentResult(
             agent=self._config.name,
             provider=provider.name,
@@ -1272,9 +1312,8 @@ class Agent:
             seconds=completion.elapsed,
             cost=completion.cost,
             currency=model.currency,
-            refused=True,
-            invariant_violations=[item.to_dict() for item in decision.violations],
-            invariant_checks=checks,
+            invariant_checks=[{"phase": "discovery", "status": "saved"}],
+            detected_invariants=[item.to_dict() for item in detected],
         )
         if self._config.history.enabled:
             message = self.conversation.add_assistant(text, model.id, provider.accent)
@@ -1283,6 +1322,70 @@ class Agent:
             message.completion_tokens = completion.completion_tokens
             message.reasoning_tokens = completion.reasoning_tokens
             message.cost = completion.cost
+            message.cost_currency = model.currency
+            self.conversation.forget_exact()
+        return result
+
+    def _preflight_invariants(self, question: str,
+                              discovery_review: Optional[Completion] = None,
+                              detected: Tuple[guarding.Invariant, ...] = ()):
+        """Проверить запрос до запуска задачи и обслуживания её памяти."""
+        if not self._config.invariants.enabled:
+            return None, None
+        decision, completion = self._review_invariants(question)
+        if decision.allowed:
+            return None, completion
+        checks = []
+        if discovery_review is not None:
+            checks.append({
+                "phase": "discovery", "status": "saved" if detected else "none"})
+        checks.append({"phase": "request", "status": "refused"})
+        return self._invariant_refusal(
+            decision, completion, checks, discovery_review, detected), None
+
+    def _invariant_refusal(self, decision, completion,
+                           checks: List[Dict[str, str]],
+                           discovery_review: Optional[Completion] = None,
+                           detected: Tuple[guarding.Invariant, ...] = ()) -> AgentResult:
+        """Вернуть объяснённый отказ, не запуская основную генерацию."""
+        provider, model = self._config.resolve()
+        text = guarding.refusal_text(decision.violations)
+        prompt_tokens = completion.prompt_tokens
+        completion_tokens = completion.completion_tokens
+        reasoning_tokens = completion.reasoning_tokens
+        seconds = completion.elapsed
+        cost = completion.cost
+        if discovery_review is not None:
+            prompt_tokens += discovery_review.prompt_tokens
+            completion_tokens += discovery_review.completion_tokens
+            reasoning_tokens += discovery_review.reasoning_tokens
+            seconds += discovery_review.elapsed
+            cost = _add(cost, discovery_review.cost)
+        result = AgentResult(
+            agent=self._config.name,
+            provider=provider.name,
+            model=model.id,
+            text=text,
+            attempts=1,
+            finish_reason=completion.finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            reasoning_tokens=reasoning_tokens,
+            seconds=seconds,
+            cost=cost,
+            currency=model.currency,
+            refused=True,
+            invariant_violations=[item.to_dict() for item in decision.violations],
+            invariant_checks=checks,
+            detected_invariants=[item.to_dict() for item in detected],
+        )
+        if self._config.history.enabled:
+            message = self.conversation.add_assistant(text, model.id, provider.accent)
+            message.elapsed = seconds
+            message.prompt_tokens = prompt_tokens
+            message.completion_tokens = completion_tokens
+            message.reasoning_tokens = reasoning_tokens
+            message.cost = cost
             message.cost_currency = model.currency
             # Контролёр видел специальный запрос, не равный истории диалога.
             self.conversation.forget_exact()

@@ -11,6 +11,7 @@ system_prompt: >-
 invariants:
   rules: []          # строгие ограничения отдельно от истории диалога
   max_tokens: 300    # предел ответа одной проверки до и после генерации
+  auto_detect: true  # распознавать явные декларации правил в обычных сообщениях
 generation:
   max_tokens: null   # null — взять резерв под ответ у модели
   temperature: 0.7

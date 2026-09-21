@@ -36,6 +36,8 @@ class AgentResult:
     refused: bool = False
     invariant_violations: List[Dict[str, str]] = field(default_factory=list)
     invariant_checks: List[Dict[str, str]] = field(default_factory=list)
+    # Правила, распознанные в обычной реплике и сохранённые до ответа.
+    detected_invariants: List[Dict[str, str]] = field(default_factory=list)
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -101,6 +103,8 @@ class AgentResult:
             payload["invariant_violations"] = self.invariant_violations
         if self.invariant_checks:
             payload["invariant_checks"] = self.invariant_checks
+        if self.detected_invariants:
+            payload["detected_invariants"] = self.detected_invariants
         if self.error:
             payload["error"] = self.error
         return payload

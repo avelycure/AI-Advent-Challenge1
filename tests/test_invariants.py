@@ -52,6 +52,15 @@ def verdict(allowed: bool, identifier: str = "", conflict: str = "") -> str:
     )
 
 
+def discovery(*items, declaration_only: bool = False) -> str:
+    import json
+
+    return json.dumps({
+        "declaration_only": declaration_only,
+        "invariants": list(items),
+    }, ensure_ascii=False)
+
+
 def test_invariants_round_trip_as_config_not_conversation_messages():
     config = guarded(ScriptedClient("unused")).config
     restored = AgentConfig.from_dict(config.to_dict())
@@ -229,6 +238,77 @@ def test_runtime_invariants_survive_new_session():
     agent.set_invariant(RULE.id, RULE.category, RULE.rule, RULE.reason)
     agent.new_session()
     assert agent.config.invariants.rules == (RULE,)
+
+
+def test_explicit_rule_in_an_ordinary_message_becomes_an_invariant():
+    kotlin = {
+        "id": "stack.kotlin-only",
+        "category": "stack",
+        "rule": "В проекте используется только Kotlin; Java запрещена",
+        "reason": "Явно установлено пользователем",
+    }
+    client = ScriptedClient([
+        discovery(kotlin, declaration_only=True),
+        verdict(False, "stack.kotlin-only",
+                "Запрос требует использовать запрещённую Java"),
+    ])
+    agent = Agent(AgentConfig(transport=FAST), client=client)
+    agent.enable_task_state_automation()
+
+    saved = agent.ask(
+        "В проекте мы используем Kotlin и только. Java использовать нельзя.")
+
+    assert agent.config.invariants.rules[0].id == "stack.kotlin-only"
+    assert saved.detected_invariants == [kotlin]
+    assert saved.invariant_checks == [
+        {"phase": "discovery", "status": "saved"},
+    ]
+    assert "Зафиксировал инвариант" in saved.text
+    assert not agent.task_state.active
+    assert len(client.calls) == 1
+    assert saved.total_tokens == agent.usage.total_tokens
+
+    refused = agent.ask("Напиши новый сервис на Java")
+    assert refused.refused
+    assert "stack.kotlin-only" in refused.text
+    assert len(client.calls) == 2
+
+
+def test_one_off_only_instruction_is_not_saved_as_an_invariant():
+    client = ScriptedClient("JVM — виртуальная машина Java.")
+    agent = Agent(AgentConfig(transport=FAST), client=client)
+
+    result = agent.ask("Ответь только кратко: что такое JVM?")
+
+    assert not agent.config.invariants.rules
+    assert result.detected_invariants == []
+    assert result.invariant_checks == []
+    assert len(client.calls) == 1
+    assert result.total_tokens == agent.usage.total_tokens
+
+
+def test_invariant_and_task_in_one_message_use_the_new_rule_immediately():
+    kotlin = {
+        "id": "stack.kotlin-only",
+        "category": "stack",
+        "rule": "В проекте используется только Kotlin; Java запрещена",
+        "reason": "Явно установлено пользователем",
+    }
+    client = ScriptedClient([
+        discovery(kotlin, declaration_only=False),
+        verdict(True),
+        "Предлагаю реализацию на Kotlin.",
+        verdict(True),
+    ])
+    agent = Agent(AgentConfig(transport=FAST), client=client)
+
+    result = agent.ask(
+        "Используем только Kotlin, Java запрещена. Спроектируй новый сервис.")
+
+    assert result.text == "Предлагаю реализацию на Kotlin."
+    assert result.detected_invariants == [kotlin]
+    assert "stack.kotlin-only" in client.calls[2][0]["content"]
+    assert len(client.calls) == 4
 
 
 def test_agent_without_invariants_keeps_the_single_call_pipeline():

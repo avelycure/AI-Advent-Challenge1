@@ -37,6 +37,7 @@ from .invariants import (
     Invariant,
     InvariantConfig,
     InvariantDecision,
+    InvariantDiscovery,
     InvariantViolation,
 )
 from .errors import (
@@ -90,7 +91,8 @@ __version__ = "2.0.0"
 __all__ = [
     "Agent", "AgentConfig", "AgentResult", "DEFAULT_CONFIG", "SYSTEM_PROMPT",
     "InputPolicy", "OutputPolicy", "JudgeConfig", "HistoryConfig", "CompressionConfig",
-    "Invariant", "InvariantConfig", "InvariantDecision", "InvariantViolation",
+    "Invariant", "InvariantConfig", "InvariantDecision", "InvariantDiscovery",
+    "InvariantViolation",
     "INVARIANT_CATEGORIES", "ARCHITECTURE", "TECHNICAL_DECISION", "STACK",
     "BUSINESS_RULE",
     "FactsConfig", "STRATEGIES", "STRATEGY_NOTES",
