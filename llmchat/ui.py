@@ -937,6 +937,7 @@ COMMANDS: List[tuple] = [
     ("/memory", "три явных слоя: диалог, данные задачи, профиль и память проекта"),
     ("/profile", "персональные настройки: обращение, стиль, формат и правила задач"),
     ("/task", "показать автоматически ведущиеся этап, шаг и ожидаемое действие"),
+    ("/invariant", "строгие ограничения: показать, добавить или удалить"),
     ("/pause", "поставить текущую задачу на паузу, сохранив место"),
     ("/resume", "продолжить задачу с сохранённого места"),
     ("/checkpoint", "запомнить место в разговоре, от которого можно отвести ветку"),
@@ -976,6 +977,9 @@ COMBINE_HINTS: List[tuple] = [
      "вручную поправить шаг, если модель определила его неверно"),
     ("/task next Реализовать изменения | Запустить тесты",
      "вручную поправить переход; обычно агент делает это сам"),
+    ("/invariant add stack stack.python Сервер только на Python",
+     "добавить строгое ограничение прямо в диалоге"),
+    ("/invariant remove stack.python", "удалить ограничение по его id"),
     ("/memory long rules no_push=без явной команды", "сохранить правило проекта"),
     ("/checkpoint выбор-стека", "запомнить место; от него потом отводят ветки"),
     ("/branch вариант-а выбор-стека", "две ветки от одного места: имя и точка"),
@@ -1138,6 +1142,31 @@ def task_panel(session: Session, note: str = "") -> RenderableType:
         style="dim"))
     return Panel(Group(*blocks), title="Состояние задачи", title_align="left",
                  border_style="magenta", box=box.ROUNDED, padding=(0, 1))
+
+
+def invariants_panel(session: Session, note: str = "") -> RenderableType:
+    """Показать строгие правила, которые действуют поверх диалога."""
+    blocks: List[RenderableType] = []
+    if note:
+        blocks.append(Text(note, style="green"))
+    if session.invariants:
+        table = _help_table()
+        table.add_column("ID", style="bold cyan", no_wrap=True)
+        table.add_column("Категория", style="magenta", no_wrap=True)
+        table.add_column("Правило")
+        table.add_column("Причина", style="dim")
+        for item in session.invariants:
+            table.add_row(item.id, item.category, item.rule, item.reason or "—")
+        blocks.append(table)
+    else:
+        blocks.append(Text(
+            "Инварианты не заданы. Добавьте первый командой ниже.", style="dim"))
+    blocks.append(Text(
+        "/invariant add категория id правило [| причина] · "
+        "/invariant remove id · /invariant clear",
+        style="dim"))
+    return Panel(Group(*blocks), title="Инварианты", title_align="left",
+                 border_style="yellow", box=box.ROUNDED, padding=(0, 1))
 
 
 def _memory_items(title: str, items) -> Table:

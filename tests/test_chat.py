@@ -14,6 +14,7 @@ import pytest
 
 from llmagent import Agent, AgentConfig, GenerationParams, Transport
 from llmchat.session import DEFAULT_TOPIC, Session
+from llmchat.app import handle_invariant
 
 from conftest import ScriptedClient, child_env
 
@@ -47,6 +48,20 @@ def test_changing_params_on_screen_reconfigures_the_agent():
     assert session.output_reserve == 64
 
 
+def test_invariants_can_be_managed_from_the_dialogue():
+    session = session_with(ScriptedClient("ответ"))
+
+    handle_invariant(
+        session,
+        "add стек stack.python Сервер только на Python | Командный стандарт")
+    rule = session.invariants[0]
+    assert (rule.id, rule.category, rule.rule, rule.reason) == (
+        "stack.python", "stack", "Сервер только на Python", "Командный стандарт")
+
+    handle_invariant(session, "remove stack.python")
+    assert session.invariants == ()
+
+
 def test_switching_model_keeps_history_and_spending():
     from llmagent.transport import PROVIDERS
 
@@ -74,6 +89,8 @@ def test_new_dialogue_clears_history_and_topic_but_not_spending():
 @pytest.mark.parametrize("script,expect", [
     ("Привет\n/stats\n/config\n/exit\n", "Конфиг агента"),
     ("/help\n/exit\n", "/config"),
+    ("/invariant add stack stack.python Сервер только на Python\n"
+     "/invariant\n/exit\n", "stack.python"),
 ])
 def test_chat_runs_from_start_to_exit(tmp_path, script, expect):
     """Сквозной прогон настоящей программы: заглушка, ноль трат, ноль вопросов."""

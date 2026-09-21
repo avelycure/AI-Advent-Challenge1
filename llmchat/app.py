@@ -51,6 +51,7 @@ from .ui import (
     branches_panel,
     choose_model,
     facts_panel,
+    invariants_panel,
     memory_panel,
     task_panel,
     strategy_panel,
@@ -519,6 +520,10 @@ def chat_loop(console: Console, keys, session: Session,
                 notice = handle_task(session, argument)
                 remember()
                 continue
+            if command in ("/invariant", "/invariants"):
+                notice = handle_invariant(session, argument)
+                remember()
+                continue
             if command == "/pause":
                 notice = pause_task(session)
                 remember()
@@ -864,6 +869,59 @@ def handle_profile(session: Session, argument: str,
     if not assignment:
         return memory_panel(session)
     return handle_memory(session, "long profile " + assignment, store)
+
+
+INVARIANT_CATEGORY_ALIASES = {
+    "architecture": "architecture",
+    "архитектура": "architecture",
+    "technical-decision": "technical-decision",
+    "decision": "technical-decision",
+    "решение": "technical-decision",
+    "stack": "stack",
+    "стек": "stack",
+    "business-rule": "business-rule",
+    "business": "business-rule",
+    "бизнес": "business-rule",
+}
+
+
+def handle_invariant(session: Session, argument: str) -> RenderableType:
+    """Показать и править строгие ограничения прямо из диалога."""
+    words = argument.strip().split(None, 1)
+    if not words:
+        return invariants_panel(session)
+    action = words[0].lower()
+    rest = words[1].strip() if len(words) > 1 else ""
+    try:
+        if action in ("add", "set"):
+            parts = rest.split(None, 2)
+            if len(parts) < 3:
+                return error_panel(
+                    "Нужно: /invariant add категория id правило [| причина].")
+            category = INVARIANT_CATEGORY_ALIASES.get(
+                parts[0].lower(), parts[0].lower())
+            rule, separator, reason = parts[2].partition("|")
+            changed = session.agent.set_invariant(
+                parts[1], category, rule.strip(), reason.strip() if separator else "")
+            note = "Инвариант {} «{}». Действует со следующей реплики.".format(
+                "сохранён" if changed else "не изменился", parts[1])
+            return invariants_panel(session, note)
+        if action in ("remove", "delete", "rm"):
+            if not rest:
+                return error_panel("Нужно назвать id: /invariant remove stack.python.")
+            changed = session.agent.remove_invariant(rest)
+            note = ("Инвариант «{}» удалён." if changed
+                    else "Инвариант «{}» не найден.").format(rest)
+            return invariants_panel(session, note)
+        if action in ("clear", "reset"):
+            removed = session.agent.clear_invariants()
+            return invariants_panel(
+                session, "Удалено инвариантов: {}.".format(removed))
+        return error_panel(
+            "Неизвестное действие «{}». Используйте add, remove или clear.".format(
+                action))
+    except (AgentError, ConfigError) as exc:
+        return error_panel(str(exc))
 
 
 def handle_task(session: Session, argument: str) -> RenderableType:

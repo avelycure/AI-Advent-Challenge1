@@ -206,6 +206,31 @@ def test_duplicate_ids_are_rejected_in_config():
         InvariantConfig(rules=(RULE, RULE))
 
 
+def test_runtime_invariants_can_be_added_replaced_and_removed():
+    agent = Agent(AgentConfig(transport=FAST), client=ScriptedClient("unused"))
+    agent.conversation.exact_context = 123
+
+    assert agent.set_invariant(RULE.id, RULE.category, RULE.rule, RULE.reason)
+    assert agent.config.invariants.rules == (RULE,)
+    assert agent.conversation.exact_context == 0
+    assert not agent.set_invariant(RULE.id, RULE.category, RULE.rule, RULE.reason)
+
+    assert agent.set_invariant(
+        RULE.id, RULE.category, "Сервер остаётся на Python", "Новое решение")
+    assert len(agent.config.invariants.rules) == 1
+    assert agent.config.invariants.rules[0].reason == "Новое решение"
+    assert agent.remove_invariant(RULE.id)
+    assert not agent.config.invariants.rules
+    assert not agent.remove_invariant(RULE.id)
+
+
+def test_runtime_invariants_survive_new_session():
+    agent = Agent(AgentConfig(transport=FAST), client=ScriptedClient("unused"))
+    agent.set_invariant(RULE.id, RULE.category, RULE.rule, RULE.reason)
+    agent.new_session()
+    assert agent.config.invariants.rules == (RULE,)
+
+
 def test_agent_without_invariants_keeps_the_single_call_pipeline():
     client = ScriptedClient("обычный ответ")
     result = Agent(AgentConfig(transport=FAST), client=client).ask("вопрос")

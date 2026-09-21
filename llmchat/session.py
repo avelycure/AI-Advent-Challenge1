@@ -146,6 +146,10 @@ class Session:
         return self.agent.task_state
 
     @property
+    def invariants(self):
+        return self.agent.config.invariants.rules
+
+    @property
     def long_term_memory(self):
         return self.agent.long_term_memory
 

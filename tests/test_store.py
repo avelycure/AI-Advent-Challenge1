@@ -149,6 +149,19 @@ def test_restored_config_has_no_key_and_looks_for_it_again(store):
     assert store.load(agent.session_id).to_config().api_key is None
 
 
+def test_runtime_invariant_is_saved_even_before_the_first_message(store):
+    from llmagent import Invariant
+
+    agent = Agent(AgentConfig(transport=FAST_DEMO), client=ScriptedClient("unused"))
+    rule = Invariant("stack.python", "stack", "Сервер только на Python")
+    agent.set_invariant(rule.id, rule.category, rule.rule)
+
+    saved = store.save(agent)
+    restored = store.load(saved.session_id).to_config()
+
+    assert restored.invariants.rules == (rule,)
+
+
 # --------------------------------------------------------------------------
 # Список, поиск, удаление
 # --------------------------------------------------------------------------

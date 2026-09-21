@@ -198,6 +198,44 @@ class Agent:
         self.conversation.forget_exact()
         return self.task_state
 
+    def set_invariant(self, identifier: str, category: str, rule: str,
+                      reason: str = "") -> bool:
+        """Добавить или заменить инвариант в работающем агенте."""
+        item = guarding.Invariant(identifier, category, rule, reason)
+        current = list(self._config.invariants.rules)
+        for index, existing in enumerate(current):
+            if existing.id == item.id:
+                if existing == item:
+                    return False
+                current[index] = item
+                break
+        else:
+            current.append(item)
+        policy = guarding.InvariantConfig(
+            rules=tuple(current), max_tokens=self._config.invariants.max_tokens)
+        self.reconfigure(invariants=policy)
+        return True
+
+    def remove_invariant(self, identifier: str) -> bool:
+        """Удалить именованный инвариант; неизвестное имя не считается ошибкой."""
+        wanted = " ".join(identifier.split())
+        current = tuple(
+            item for item in self._config.invariants.rules if item.id != wanted)
+        if len(current) == len(self._config.invariants.rules):
+            return False
+        policy = guarding.InvariantConfig(
+            rules=current, max_tokens=self._config.invariants.max_tokens)
+        self.reconfigure(invariants=policy)
+        return True
+
+    def clear_invariants(self) -> int:
+        """Удалить все инварианты и вернуть их прежнее количество."""
+        removed = len(self._config.invariants.rules)
+        if removed:
+            self.reconfigure(invariants=guarding.InvariantConfig(
+                max_tokens=self._config.invariants.max_tokens))
+        return removed
+
     def remember(self, layer: str, key: str, value: str,
                  section: str = "") -> bool:
         """Явно записать значение в выбранный слой; пустое значение удаляет."""
@@ -305,6 +343,11 @@ class Agent:
             # Во всех ветках: чужой токенизатор не описывает ни одну из них.
             for conversation in self.branches.each_conversation():
                 conversation.forget_model()
+        elif "invariants" in changes:
+            # Инварианты входят в system prompt. Точное измерение прежнего
+            # запроса после их правки больше не описывает следующий.
+            for conversation in self.branches.each_conversation():
+                conversation.forget_exact()
         if provider_changed or credentials_changed:
             self._client = None
             self._credentials = None

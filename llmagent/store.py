@@ -158,7 +158,8 @@ class SessionStore:
         идентификатором, а вызывающему об этом сообщается.
         """
         if (not agent.conversation.messages and not agent.working_memory.items
-                and not agent.task_state.active):
+                and not agent.task_state.active
+                and not agent.config.invariants.enabled):
             return Saved(self.path_for(agent.session_id), agent.session_id, seen_at or 0.0)
 
         forked_from = ""
