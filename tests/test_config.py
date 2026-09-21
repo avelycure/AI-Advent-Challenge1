@@ -149,11 +149,19 @@ def test_shipped_configs_actually_answer(path):
 
     config = AgentConfig.from_file(str(path)).with_changes(
         transport=Transport(demo=True, demo_delay=0.0))
-    # Второй ответ — на случай судьи или переспроса по выходной политике.
+    # Дополнительные ответы — на случай проверок инвариантов, судьи или
+    # переспроса по выходной политике.
     # Набор инструментов настоящий: конфиг может их включать, и тогда без
     # набора он бы не собрался — а проверять надо годность конфига.
-    agent = Agent(config, toolbox=toolbox_for(config), client=ScriptedClient(
-        ['{"items": []}', "полнота: 4\nясность: 4\nобоснованность: 4"]))
+    replies = []
+    if config.invariants.enabled:
+        replies.append('{"allowed":true,"violations":[]}')
+    replies.append('{"items": []}')
+    if config.invariants.enabled:
+        replies.append('{"allowed":true,"violations":[]}')
+    replies.append("полнота: 4\nясность: 4\nобоснованность: 4")
+    agent = Agent(config, toolbox=toolbox_for(config),
+                  client=ScriptedClient(replies))
     result = agent.ask("Проверочный вопрос")
     assert result.text
     assert agent.usage.requests >= 1

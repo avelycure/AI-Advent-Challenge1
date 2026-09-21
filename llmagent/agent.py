@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from . import compression
 from . import facts as recording
+from . import invariants as guarding
 from . import judge as judging
 from . import policies
 from .branches import Branch, Branches, Checkpoint
@@ -47,7 +48,18 @@ from .transport import (
     count_text_tokens,
     request_cost,
 )
-from .usage import FACTS, JUDGE, MAIN, REPAIR, SIDE, SUB, SUMMARY, TOOL, UsageMeter
+from .usage import (
+    FACTS,
+    INVARIANTS,
+    JUDGE,
+    MAIN,
+    REPAIR,
+    SIDE,
+    SUB,
+    SUMMARY,
+    TOOL,
+    UsageMeter,
+)
 
 # Пересказ — работа не творческая: одни и те же сообщения должны сворачиваться
 # в одно и то же, поэтому разброс здесь ни к чему.
@@ -692,8 +704,11 @@ class Agent:
         """
         prepared = self.prepare_input(text)
         if not self._config.history.enabled:
+            refusal, request_review = self._preflight_invariants(prepared)
+            if refusal is not None:
+                return refusal
             self._ensure_task_started(prepared)
-            return self._answer(self._plain_messages(prepared))
+            return self._answer(self._plain_messages(prepared), request_review)
 
         self.conversation.add_user(prepared)
         try:
@@ -708,13 +723,17 @@ class Agent:
         Вопрос из истории при неудаче не убирается: этот путь для вызывающего,
         который сам положил его туда и сам решает, что делать дальше.
         """
-        self._ensure_task_started(self._request_text())
+        question = self._request_text()
+        refusal, request_review = self._preflight_invariants(question)
+        if refusal is not None:
+            return refusal
+        self._ensure_task_started(question)
         if not self._config.history.enabled:
             # Интерактивный чат кладёт вопрос на экран до запроса и потому
             # приходит этим методом. При opt-out отправляем только этот вопрос:
             # ни накопленный диалог, ни working/project-memory, ни служебные
             # сжатия не уходят провайдеру. Профиль пользователя остаётся.
-            return self._answer(self._request_messages())
+            return self._answer(self._request_messages(), request_review)
 
         # Сжимаем до того, как считать переполнение: пересказ освобождает
         # место, и проверять окно раньше него значило бы отказывать разговору,
@@ -728,7 +747,7 @@ class Agent:
         # Умещаем диалог до сборки сообщений: обрезать историю после того, как
         # запрос собран, — значит отправить в модель прежний, длинный.
         self.fit_context()
-        return self._answer(self._request_messages())
+        return self._answer(self._request_messages(), request_review)
 
     def retry_last(self) -> Optional[AgentResult]:
         """Задать последний вопрос ещё раз — на той модели, что выбрана сейчас.
@@ -739,8 +758,12 @@ class Agent:
         index = self.conversation.last_user_index()
         if index < 0:
             return None
+        refusal, request_review = self._preflight_invariants(
+            self._request_text(index))
+        if refusal is not None:
+            return refusal
         messages = self._request_messages_upto(index)
-        return self._answer(messages)
+        return self._answer(messages, request_review)
 
     def ask_messages(self, messages: List[Dict[str, str]], *, kind: str = MAIN,
                      max_tokens: Optional[int] = None,
@@ -793,6 +816,9 @@ class Agent:
     def _system_prompt(self) -> str:
         prompt = policies.output_system_prompt(self._config.output,
                                                self._config.system_prompt)
+        invariant_prompt = self._config.invariants.system_prompt()
+        if invariant_prompt:
+            prompt = (prompt + "\n\n" + invariant_prompt) if prompt else invariant_prompt
         if (self.automatic_task_state and self.task_state.active
                 and not self.task_state.paused):
             prompt = (prompt + AUTOMATIC_CONTROL) if prompt else AUTOMATIC_CONTROL.strip()
@@ -925,7 +951,8 @@ class Agent:
 
     def _use_tools(self, transcript: List[Dict[str, object]],
                    invocations: List[Dict[str, object]],
-                   spent: Dict[str, float]) -> Completion:
+                   spent: Dict[str, float], question: str,
+                   invariant_checks: List[Dict[str, str]]) -> Completion:
         """Спрашивать модель, пока она просит вызвать инструменты.
 
         Один круг — модель просит вызов, мы выполняем и возвращаем результат.
@@ -955,7 +982,27 @@ class Agent:
 
             transcript.append(_assistant_asking(completion))
             for call in completion.tool_calls:
-                outcome = self._toolbox.run(call.name, call.arguments)
+                outcome = None
+                if self._config.invariants.enabled:
+                    proposal = (
+                        "Вызвать инструмент `{}` с аргументами: {}".format(
+                            call.name, call.arguments))
+                    decision, review = self._review_invariants(question, proposal)
+                    _pile_up(spent, review)
+                    invariant_checks.append({
+                        "phase": "tool",
+                        "tool": call.name,
+                        "status": "allowed" if decision.allowed else "refused",
+                    })
+                    if not decision.allowed:
+                        outcome = ToolOutcome(
+                            guarding.refusal_text(decision.violations),
+                            ok=False,
+                            detail={"invariant_violations": [
+                                item.to_dict() for item in decision.violations]},
+                        )
+                if outcome is None:
+                    outcome = self._toolbox.run(call.name, call.arguments)
                 self._absorb_tool_usage(outcome)
                 invocations.append({"name": call.name, "arguments": call.arguments,
                                     "ok": outcome.ok, "text": outcome.text,
@@ -981,7 +1028,8 @@ class Agent:
             spent.get("cost"), str(spent.get("currency", "USD")),
             kind=SUB, requests=int(spent.get("requests", 1) or 1))
 
-    def _answer(self, messages: List[Dict[str, str]]) -> AgentResult:
+    def _answer(self, messages: List[Dict[str, str]],
+                request_review: Optional[Completion] = None) -> AgentResult:
         """Спросить модель и, если форма не соблюдена, переспросить."""
         policy = self._config.output
         provider, model = self._config.resolve()
@@ -990,6 +1038,10 @@ class Agent:
         # пользователя оказывается замечание о форме, а не сама задача.
         question = next((m["content"] for m in reversed(messages)
                          if m["role"] == "user"), "")
+
+        invariant_checks: List[Dict[str, str]] = (
+            [{"phase": "request", "status": "allowed"}]
+            if request_review is not None else [])
 
         attempt = 0
         completion = None
@@ -1008,7 +1060,8 @@ class Agent:
         while attempt < policy.max_attempts:
             attempt += 1
             if self._toolbox and attempt == 1:
-                completion = self._use_tools(transcript, invocations, tool_spent)
+                completion = self._use_tools(
+                    transcript, invocations, tool_spent, question, invariant_checks)
             else:
                 completion = self._call(transcript,
                                         kind=MAIN if attempt == 1 else REPAIR)
@@ -1045,6 +1098,15 @@ class Agent:
         reasoning_tokens += int(tool_spent.get("reasoning_tokens", 0))
         spent_seconds += tool_spent.get("seconds", 0.0)
         cost = _add(cost, tool_spent.get("cost"))
+        if request_review is not None:
+            # Ранняя проверка совместимого запроса тоже часть пути этого
+            # ответа. UsageMeter уже учёл её отдельной строкой, а здесь она
+            # входит в суммарные метрики AgentResult.
+            spent_seconds += request_review.elapsed
+            prompt_tokens += request_review.prompt_tokens
+            completion_tokens += request_review.completion_tokens
+            reasoning_tokens += request_review.reasoning_tokens
+            cost = _add(cost, request_review.cost)
 
         text = policies.clean_output(policy, completion.text)
         if not text:
@@ -1060,16 +1122,43 @@ class Agent:
                 attempt, "попытку" if attempt == 1 else "попытки",
                 validation.failure_summary()))
 
-        if self.automatic_task_state:
+        refused = False
+        invariant_violations: List[Dict[str, str]] = []
+        if self._config.invariants.enabled:
+            decision, review = self._review_invariants(question, text)
+            invariant_checks.append({
+                "phase": "response",
+                "status": "allowed" if decision.allowed else "refused",
+            })
+            # Проверка ответа — такой же оплаченный запрос. Он относится к
+            # текущему результату, поэтому итоговые метрики включают его.
+            spent_seconds += review.elapsed
+            prompt_tokens += review.prompt_tokens
+            completion_tokens += review.completion_tokens
+            reasoning_tokens += review.reasoning_tokens
+            cost = _add(cost, review.cost)
+            if not decision.allowed:
+                refused = True
+                invariant_violations = [item.to_dict() for item in decision.violations]
+                text = guarding.refusal_text(decision.violations)
+                # Политика формы относится к запрошенному содержательному
+                # ответу. Защитный отказ всегда объясняется человеку текстом.
+                validation = None
+                task_update = None
+
+        if self.automatic_task_state and not refused:
             task_update = self._review_task_update(task_update, text, question)
 
         result = AgentResult(
             agent=self._config.name, provider=provider.name, model=model.id,
-            text=text, data=validation.data, validation=validation, attempts=attempt,
+            text=text, data=validation.data if validation is not None else None,
+            validation=validation, attempts=attempt,
             finish_reason=completion.finish_reason, dropped_params=dropped, notes=notes,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             reasoning_tokens=reasoning_tokens, seconds=spent_seconds,
             cost=cost, currency=model.currency, tool_calls=invocations,
+            refused=refused, invariant_violations=invariant_violations,
+            invariant_checks=invariant_checks,
         )
 
         if self._config.history.enabled:
@@ -1092,7 +1181,7 @@ class Agent:
                     estimate=count_message_tokens(
                         self._request_messages()))
 
-        if self.automatic_task_state and task_update is not None:
+        if self.automatic_task_state and not refused and task_update is not None:
             # Неверный переход не ломает уже полученный ответ: автомат просто
             # остаётся на прежнем этапе и попробует снова на следующем ходе.
             # Переход делается после учёта контекста, чтобы забыть измерение,
@@ -1100,8 +1189,60 @@ class Agent:
             if self.task_state.absorb_model_update(task_update):
                 self.conversation.forget_exact()
 
-        if self._config.judge is not None:
+        if self._config.judge is not None and not refused:
             self._apply_judge(result, question)
+        return result
+
+    def _review_invariants(self, question: str, answer: str = ""):
+        """Получить отдельный вердикт до решения и перед его выдачей."""
+        completion = self._call(
+            guarding.review_messages(self._config.invariants, question, answer),
+            kind=INVARIANTS, max_tokens=self._config.invariants.max_tokens,
+            temperature=0.0, stop=[], response_format={})
+        return guarding.parse_decision(completion.text, self._config.invariants), completion
+
+    def _preflight_invariants(self, question: str):
+        """Проверить запрос до запуска задачи и обслуживания её памяти."""
+        if not self._config.invariants.enabled:
+            return None, None
+        decision, completion = self._review_invariants(question)
+        if decision.allowed:
+            return None, completion
+        checks = [{"phase": "request", "status": "refused"}]
+        return self._invariant_refusal(decision, completion, checks), None
+
+    def _invariant_refusal(self, decision, completion,
+                           checks: List[Dict[str, str]]) -> AgentResult:
+        """Вернуть объяснённый отказ, не запуская основную генерацию."""
+        provider, model = self._config.resolve()
+        text = guarding.refusal_text(decision.violations)
+        result = AgentResult(
+            agent=self._config.name,
+            provider=provider.name,
+            model=model.id,
+            text=text,
+            attempts=1,
+            finish_reason=completion.finish_reason,
+            prompt_tokens=completion.prompt_tokens,
+            completion_tokens=completion.completion_tokens,
+            reasoning_tokens=completion.reasoning_tokens,
+            seconds=completion.elapsed,
+            cost=completion.cost,
+            currency=model.currency,
+            refused=True,
+            invariant_violations=[item.to_dict() for item in decision.violations],
+            invariant_checks=checks,
+        )
+        if self._config.history.enabled:
+            message = self.conversation.add_assistant(text, model.id, provider.accent)
+            message.elapsed = completion.elapsed
+            message.prompt_tokens = completion.prompt_tokens
+            message.completion_tokens = completion.completion_tokens
+            message.reasoning_tokens = completion.reasoning_tokens
+            message.cost = completion.cost
+            message.cost_currency = model.currency
+            # Контролёр видел специальный запрос, не равный истории диалога.
+            self.conversation.forget_exact()
         return result
 
     def _review_task_update(self, update: Optional[Dict[str, Any]],

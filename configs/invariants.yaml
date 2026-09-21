@@ -1,0 +1,30 @@
+# Пример ассистента с архитектурными, техническими, стековыми и бизнес-инвариантами.
+name: invariant-guarded
+provider: openai
+model: gpt-5.4-mini
+system_prompt: >-
+  Ты — технический ассистент проекта. Отвечай на языке пользователя и предлагай
+  решения, которые можно применить в существующей системе.
+invariants:
+  max_tokens: 300
+  rules:
+    - id: architecture.modular-monolith
+      category: architecture
+      rule: Система остаётся модульным монолитом; новые отдельные микросервисы запрещены
+      reason: Команда не готова поддерживать распределённую инфраструктуру
+    - id: decision.postgres-source-of-truth
+      category: technical-decision
+      rule: PostgreSQL остаётся единственным источником истины для бизнес-данных
+      reason: Решение принято в ADR-004
+    - id: stack.python
+      category: stack
+      rule: Серверная часть пишется на Python 3.12 с FastAPI
+      reason: Это поддерживаемый командой серверный стек
+    - id: business.no-negative-balance
+      category: business-rule
+      rule: Операция не может переводить баланс клиента ниже нуля
+      reason: Отрицательный баланс запрещён правилами продукта
+history:
+  strategy: summary
+transport:
+  demo: false

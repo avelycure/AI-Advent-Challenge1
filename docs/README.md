@@ -23,6 +23,7 @@
 | [feature-compression.md](feature-compression.md) | сжатие истории: пересказ вместо начала разговора, три способа рядом |
 | [feature-context-strategies.md](feature-context-strategies.md) | четыре стратегии управления контекстом, картотека фактов и ветки диалога |
 | [feature-task-state-machine.md](feature-task-state-machine.md) | конечный автомат задачи: этап, текущий шаг, ожидаемое действие, пауза и продолжение |
+| [feature-invariants.md](feature-invariants.md) | инварианты отдельно от диалога, проверки до и после ответа, объяснённый отказ |
 
 Все эти работы собраны в одной ветке `feature/llm-params`: сначала они велись
 по отдельным веткам, но это раздробило связанные правки одних и тех же файлов

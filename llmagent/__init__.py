@@ -28,6 +28,17 @@ from .config import (
     ToolPolicy,
     Transport,
 )
+from .invariants import (
+    ARCHITECTURE,
+    BUSINESS_RULE,
+    INVARIANT_CATEGORIES,
+    STACK,
+    TECHNICAL_DECISION,
+    Invariant,
+    InvariantConfig,
+    InvariantDecision,
+    InvariantViolation,
+)
 from .errors import (
     AgentError,
     BudgetExceeded,
@@ -37,6 +48,7 @@ from .errors import (
     LLMError,
     MissingCredentials,
     OutputRejected,
+    InvariantCheckError,
 )
 from .formats import FORMATS, FREE_FORMAT, STOP_MARKER, Check, Field, Schema, Validation
 from .breakdown import RequestBreakdown, Step
@@ -78,6 +90,9 @@ __version__ = "2.0.0"
 __all__ = [
     "Agent", "AgentConfig", "AgentResult", "DEFAULT_CONFIG", "SYSTEM_PROMPT",
     "InputPolicy", "OutputPolicy", "JudgeConfig", "HistoryConfig", "CompressionConfig",
+    "Invariant", "InvariantConfig", "InvariantDecision", "InvariantViolation",
+    "INVARIANT_CATEGORIES", "ARCHITECTURE", "TECHNICAL_DECISION", "STACK",
+    "BUSINESS_RULE",
     "FactsConfig", "STRATEGIES", "STRATEGY_NOTES",
     "Branch", "Branches", "Checkpoint",
     "Budget", "Transport",
@@ -94,5 +109,5 @@ __all__ = [
     "find_model", "append_system_prompt",
     "spawn", "spawn_sync", "build_agents", "matrix", "summarize",
     "AgentError", "ConfigError", "MissingCredentials", "InputRejected",
-    "OutputRejected", "BudgetExceeded", "ContextOverflow", "LLMError",
+    "OutputRejected", "InvariantCheckError", "BudgetExceeded", "ContextOverflow", "LLMError",
 ]

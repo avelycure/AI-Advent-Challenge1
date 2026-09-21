@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, get_args, get_origin
 
 from . import formats
 from .errors import ConfigError
+from .invariants import Invariant, InvariantConfig
 from .params import GenerationParams
 from .transport import PROVIDERS, ModelInfo, ProviderInfo
 
@@ -328,6 +329,7 @@ class AgentConfig:
     api_key: Optional[str] = None
     api_extra: Optional[str] = None
     system_prompt: str = SYSTEM_PROMPT
+    invariants: InvariantConfig = field(default_factory=InvariantConfig)
     generation: GenerationParams = field(default_factory=GenerationParams)
     input: InputPolicy = field(default_factory=InputPolicy)
     output: OutputPolicy = field(default_factory=OutputPolicy)
@@ -505,6 +507,7 @@ def _history_from_day9(payload: Dict[str, Any]) -> Dict[str, Any]:
 # на лету дороже и хрупче, чем назвать восстановление явно.
 _NESTED: Dict[str, Any] = {
     "generation": GenerationParams,
+    "invariants": InvariantConfig,
     "input": InputPolicy,
     "output": OutputPolicy,
     "judge": JudgeConfig,
@@ -516,6 +519,7 @@ _NESTED: Dict[str, Any] = {
     "transport": Transport,
     "schema": formats.Schema,
     "agent": "AgentConfig",
+    "rules": Invariant,
 }
 
 
@@ -523,6 +527,7 @@ _NESTED: Dict[str, Any] = {
 _TUPLE_FIELDS = {
     (InputPolicy, "forbidden"),
     (ToolPolicy, "enabled"),
+    (InvariantConfig, "rules"),
 }
 
 
@@ -605,6 +610,8 @@ def _restore(owner: type, name: str, value: Any) -> Any:
     нельзя: ``enabled`` у истории — признак, а у инструментов — список имён,
     и разбор по имени превращал один в другой.
     """
+    if (owner, name) == (InvariantConfig, "rules"):
+        return tuple(_from_plain(Invariant, item) for item in value or ())
     if (owner, name) in _TUPLE_FIELDS:
         if isinstance(value, str):
             # Одно значение строкой — обычная запись: «--set forbidden=пароль».

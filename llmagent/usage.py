@@ -26,8 +26,9 @@ SUB = "под-агент"
 TOOL = "инструмент"
 SUMMARY = "сжатие"
 FACTS = "факты"
+INVARIANTS = "инварианты"
 
-KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB, TOOL, SUMMARY, FACTS)
+KINDS = (MAIN, REPAIR, JUDGE, SIDE, SUB, TOOL, SUMMARY, FACTS, INVARIANTS)
 
 
 @dataclass

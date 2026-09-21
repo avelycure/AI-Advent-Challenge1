@@ -1081,6 +1081,13 @@ def retry_last(console: Console, session: Session) -> Optional[RenderableType]:
 
 
 def answer_notice(session: Session, result) -> Optional[RenderableType]:
+    if result.refused:
+        identifiers = ", ".join(
+            item.get("id", "") for item in result.invariant_violations)
+        return info_panel(
+            "Конфликт с инвариантами: {}. Решение не было выдано.".format(
+                identifiers or "неизвестно"),
+            title="Инварианты", style="yellow")
     if result.validation is not None and not result.validation.ok:
         return warning_panel(
             "Ответ не прошёл выходную политику за {} {}: {}.".format(

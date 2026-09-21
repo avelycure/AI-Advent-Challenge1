@@ -10,7 +10,8 @@ from __future__ import annotations
 from .transport import LLMError
 
 __all__ = ["AgentError", "ConfigError", "MissingCredentials", "InputRejected",
-           "OutputRejected", "BudgetExceeded", "ContextOverflow", "LLMError"]
+           "OutputRejected", "InvariantCheckError", "BudgetExceeded",
+           "ContextOverflow", "LLMError"]
 
 
 class AgentError(Exception):
@@ -31,6 +32,10 @@ class InputRejected(AgentError):
 
 class OutputRejected(AgentError):
     """Ответ не прошёл выходную политику, и переспросы не помогли."""
+
+
+class InvariantCheckError(AgentError):
+    """Контролёр не смог надёжно подтвердить соблюдение инвариантов."""
 
 
 class BudgetExceeded(AgentError):
