@@ -40,6 +40,7 @@ from .task_state import (
     parse_task_update,
     split_task_directive,
     state_review_messages,
+    transition_refusal,
 )
 from .transport import (
     Completion,
@@ -180,6 +181,16 @@ class Agent:
     def advance_task(self, current_step: str = "",
                      expected_action: str = "") -> TaskState:
         self.task_state.advance(current_step, expected_action)
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def approve_task_plan(self) -> TaskState:
+        self.task_state.approve_plan()
+        self.conversation.forget_exact()
+        return self.task_state
+
+    def pass_task_validation(self, evidence: str) -> TaskState:
+        self.task_state.pass_validation(evidence)
         self.conversation.forget_exact()
         return self.task_state
 
@@ -907,6 +918,9 @@ class Agent:
         if self.automatic_task_state and not self.task_state.active:
             self.task_state.start_from_request(request)
             self.conversation.forget_exact()
+        elif (self.automatic_task_state
+              and self.task_state.observe_user_message(request)):
+            self.conversation.forget_exact()
 
     def _request_text(self, index: int = -1) -> str:
         """Последний пользовательский запрос до заданной позиции."""
@@ -1125,7 +1139,9 @@ class Agent:
         tool_spent: Dict[str, float] = {}
         while attempt < policy.max_attempts:
             attempt += 1
-            if self._toolbox and attempt == 1:
+            if (self._toolbox and attempt == 1
+                    and (not self.automatic_task_state
+                         or self.task_state.execution_allowed)):
                 completion = self._use_tools(
                     transcript, invocations, tool_spent, question, invariant_checks)
             else:
@@ -1195,6 +1211,7 @@ class Agent:
                 validation.failure_summary()))
 
         refused = False
+        task_transition_checks: List[Dict[str, str]] = []
         invariant_violations: List[Dict[str, str]] = []
         if self._config.invariants.enabled:
             decision, review = self._review_invariants(question, text)
@@ -1220,6 +1237,25 @@ class Agent:
 
         if self.automatic_task_state and not refused:
             task_update = self._review_task_update(task_update, text, question)
+            if task_update is not None:
+                transition_error = self.task_state.model_update_error(task_update)
+                if transition_error:
+                    refused = True
+                    task_transition_checks.append({
+                        "status": "refused",
+                        "from": self.task_state.stage,
+                        "to": str(task_update.get("stage") or ""),
+                        "reason": transition_error,
+                    })
+                    text = transition_refusal(transition_error, self.task_state)
+                    task_update = None
+                    validation = None
+                else:
+                    task_transition_checks.append({
+                        "status": "allowed",
+                        "from": self.task_state.stage,
+                        "to": str(task_update.get("stage") or ""),
+                    })
 
         result = AgentResult(
             agent=self._config.name, provider=provider.name, model=model.id,
@@ -1231,6 +1267,7 @@ class Agent:
             cost=cost, currency=model.currency, tool_calls=invocations,
             refused=refused, invariant_violations=invariant_violations,
             invariant_checks=invariant_checks,
+            task_transition_checks=task_transition_checks,
             detected_invariants=[item.to_dict() for item in detected_invariants],
         )
 
@@ -1407,6 +1444,11 @@ class Agent:
         wanted = str((update or {}).get("stage") or "").strip().lower()
         if wanted in TASK_STAGES:
             if TASK_STAGES.index(wanted) > TASK_STAGES.index(state.stage):
+                return update
+            # До утверждения плана никакой переход всё равно не будет принят.
+            # Явная директива planning достаточна: дополнительный запрос здесь
+            # только тратил бы токены на подтверждение отсутствия перехода.
+            if wanted == state.stage == TASK_STAGES[0] and not state.plan_approved:
                 return update
 
         objective = ""

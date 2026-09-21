@@ -945,6 +945,12 @@ def handle_task(session: Session, argument: str) -> RenderableType:
             session.agent.advance_task(step, expected)
             return task_panel(session, "Переход: {} → {}.".format(
                 previous, session.task_state.stage))
+        if action in ("approve", "approve-plan"):
+            session.agent.approve_task_plan()
+            return task_panel(session, "План утверждён; переход в execution разрешён.")
+        if action in ("validate", "pass-validation"):
+            session.agent.pass_task_validation(details)
+            return task_panel(session, "Успешная валидация зафиксирована.")
         if action == "reset":
             session.agent.reset_task()
             return task_panel(session, "Состояние задачи очищено.")
@@ -958,8 +964,8 @@ def handle_task(session: Session, argument: str) -> RenderableType:
                 session.agent.transition_task(action, step, expected)
             return task_panel(session, "Этап задачи: {}.".format(action))
         return error_panel(
-            "Неизвестное действие «{}». Используйте start, step, next, "
-            "planning, execution, validation, done или reset.".format(action))
+            "Неизвестное действие «{}». Используйте start, step, approve, next, "
+            "validate, planning, execution, validation, done или reset.".format(action))
     except AgentError as exc:
         return error_panel(escape(str(exc)))
 
@@ -1139,6 +1145,16 @@ def retry_last(console: Console, session: Session) -> Optional[RenderableType]:
 
 
 def answer_notice(session: Session, result) -> Optional[RenderableType]:
+    refused_transition = next((
+        item for item in result.task_transition_checks
+        if item.get("status") == "refused"), None)
+    if refused_transition is not None:
+        return info_panel(
+            "Переход {} → {} отклонён. Этап не изменился. {}".format(
+                refused_transition.get("from", "?"),
+                refused_transition.get("to", "?"),
+                refused_transition.get("reason", "")),
+            title="Жизненный цикл", style="yellow")
     if result.refused:
         identifiers = ", ".join(
             item.get("id", "") for item in result.invariant_violations)

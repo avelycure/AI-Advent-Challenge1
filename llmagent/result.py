@@ -32,12 +32,14 @@ class AgentResult:
     dropped_params: List[str] = field(default_factory=list)
     # Что программа изменила в запросе сама, чтобы он прошёл.
     notes: List[str] = field(default_factory=list)
-    # Отказ по инвариантам — успешное решение политики, а не ошибка транспорта.
+    # Защитный отказ — успешное решение политики, а не ошибка транспорта.
     refused: bool = False
     invariant_violations: List[Dict[str, str]] = field(default_factory=list)
     invariant_checks: List[Dict[str, str]] = field(default_factory=list)
     # Правила, распознанные в обычной реплике и сохранённые до ответа.
     detected_invariants: List[Dict[str, str]] = field(default_factory=list)
+    # Решение контроллера жизненного цикла для служебной директивы модели.
+    task_transition_checks: List[Dict[str, str]] = field(default_factory=list)
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -105,6 +107,8 @@ class AgentResult:
             payload["invariant_checks"] = self.invariant_checks
         if self.detected_invariants:
             payload["detected_invariants"] = self.detected_invariants
+        if self.task_transition_checks:
+            payload["task_transition_checks"] = self.task_transition_checks
         if self.error:
             payload["error"] = self.error
         return payload

@@ -977,6 +977,8 @@ COMBINE_HINTS: List[tuple] = [
      "вручную поправить шаг, если модель определила его неверно"),
     ("/task next Реализовать изменения | Запустить тесты",
      "вручную поправить переход; обычно агент делает это сам"),
+    ("/task approve", "явно утвердить план и открыть переход в execution"),
+    ("/task validate Все тесты прошли", "зафиксировать проверку перед done"),
     ("/invariant add stack stack.python Сервер только на Python",
      "добавить строгое ограничение прямо в диалоге"),
     ("/invariant remove stack.python", "удалить ограничение по его id"),
@@ -1134,10 +1136,14 @@ def task_panel(session: Session, note: str = "") -> RenderableType:
                       state.expected_action or "продолжить текущий шаг")
         table.add_row("Статус", Text("пауза" if state.paused else "в работе",
                                      style="yellow" if state.paused else "green"))
+        table.add_row("План утверждён", "да" if state.plan_approved else "нет")
+        table.add_row("Валидация", state.validation_evidence
+                      if state.validation_passed else "не пройдена")
         blocks.append(table)
 
     blocks.append(Text(
         "Этапы меняются автоматически · /pause · /resume · "
+        "ворота: /task approve, /task validate результат · "
         "ручная коррекция: /task step, /task next, /task reset",
         style="dim"))
     return Panel(Group(*blocks), title="Состояние задачи", title_align="left",

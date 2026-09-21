@@ -645,9 +645,14 @@ class DemoClient:
                 found = re.search(r"Этап:\s*(planning|execution|validation|done)",
                                   state_message)
                 current = found.group(1) if found else "planning"
+                plan_approved = "План утверждён: да" in state_message
                 updates = {
-                    "planning": ("execution", "Выполнить задачу пользователя",
-                                 "Перейти к проверке результата"),
+                    "planning": (
+                        ("execution", "Выполнить утверждённый план",
+                         "Перейти к проверке результата")
+                        if plan_approved else
+                        ("planning", "Предложить план пользователю",
+                         "Получить явное утверждение плана")),
                     "execution": ("validation", "Проверить выполненную работу",
                                   "Подтвердить корректность результата"),
                     "validation": ("done", "Задача выполнена и проверена",
@@ -656,7 +661,11 @@ class DemoClient:
                 }
                 stage, step, expected = updates[current]
                 directive = {"stage": stage, "current_step": step,
-                             "expected_action": expected, "paused": False}
+                             "expected_action": expected, "paused": False,
+                             "validation_passed": current == "validation",
+                             "validation_evidence": (
+                                 "Демонстрационная проверка результата завершена"
+                                 if current == "validation" else "")}
                 text += "\n\n[[TASK_STATE {}]]".format(
                     json.dumps(directive, ensure_ascii=False, separators=(",", ":")))
         return Completion(
