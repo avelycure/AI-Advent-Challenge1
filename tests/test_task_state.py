@@ -185,12 +185,12 @@ def test_a_plain_user_task_starts_and_advances_the_machine_automatically():
     assert session.task_state.expected_action == "Подтвердить результат"
 
 
-def test_the_model_cannot_skip_a_stage_while_controlling_the_machine():
+def test_a_model_result_can_finish_several_stages_but_the_machine_walks_forward():
     client = ScriptedClient(answer_with_state(
-        "Попытка готова.", VALIDATION, "Проверить", "Завершить"))
+        "Решение создано и проверяется.", VALIDATION, "Проверить", "Завершить"))
     session = Session(Agent(AgentConfig(transport=FAST), client=client))
     session.agent.ask("Создай калькулятор")
-    assert session.task_state.stage == PLANNING
+    assert session.task_state.stage == VALIDATION
 
 
 def test_the_model_can_pause_on_any_current_stage():
@@ -233,3 +233,29 @@ def test_automatic_task_resumes_from_disk_without_repeating_requirements(tmp_pat
     assert "Этап: execution" in sent
     assert "Текущий шаг: Реализовать калькулятор" in sent
     assert continued.task_state.stage == VALIDATION
+
+
+def test_state_reviewer_moves_a_finished_solution_out_of_execution_and_to_done():
+    client = ScriptedClient([
+        answer_with_state("План готов.", EXECUTION,
+                          "Реализовать калькулятор", "Создать решение"),
+        answer_with_state("Готово. Калькулятор полностью реализован.", EXECUTION,
+                          "Ждать улучшений", "Пользователь должен попросить ещё"),
+        ('{"stage":"validation","current_step":"Проверить калькулятор",'
+         '"expected_action":"Запустить проверки","paused":false}'),
+        answer_with_state("Все операции и деление на ноль проверены.", VALIDATION,
+                          "Проверка завершена", "Подтвердить результат"),
+        ('{"stage":"done","current_step":"Калькулятор готов и проверен",'
+         '"expected_action":"Действий не требуется","paused":false}'),
+    ])
+    session = Session(Agent(AgentConfig(transport=FAST), client=client))
+
+    session.agent.ask("Создай калькулятор")
+    session.agent.ask("Заканчивай решение")
+    assert session.task_state.stage == VALIDATION
+    assert session.task_state.current_step == "Проверить калькулятор"
+
+    session.agent.ask("Продолжай")
+    assert session.task_state.stage == DONE
+    assert session.task_state.current_step == "Калькулятор готов и проверен"
+    assert len(client.calls) == 5

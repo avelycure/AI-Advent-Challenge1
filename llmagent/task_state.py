@@ -39,12 +39,18 @@ AUTOMATIC_CONTROL = (
     "такого вида (она будет скрыта от пользователя):\n"
     '[[TASK_STATE {"stage":"execution","current_step":"что делать теперь",'
     '"expected_action":"следующее действие","paused":false}]]\n'
-    "stage должен остаться текущим или перейти ровно на один следующий этап: "
-    "planning → execution → validation → done. Не пропускай этапы. "
+    "stage должен показывать фактически достигнутый после ответа этап цепочки "
+    "planning → execution → validation → done. Программа проведёт переход "
+    "через все промежуточные этапы. "
     "current_step описывает актуальный шаг после твоего ответа, а "
     "expected_action — конкретное действие следующим. paused=true ставь, "
-    "только если без ответа или решения пользователя продолжать нельзя."
+    "только если без ответа или решения пользователя продолжать нельзя. "
+    "Как только требуемое решение создано, переходи как минимум в validation; "
+    "не оставайся в execution ради необязательных улучшений. После собственной "
+    "проверки результата переходи в done."
 )
+
+STATE_REVIEW_MAX_CHARS = 8000
 
 
 def _clean(value: Any) -> str:
@@ -175,13 +181,19 @@ class TaskState:
         if not self.active or self.paused or not isinstance(payload, dict):
             return False
         wanted = _clean(payload.get("stage")).lower()
-        allowed = (self.stage, self.next_stage) if self.next_stage else (self.stage,)
-        if wanted not in allowed:
+        if wanted not in TASK_STAGES:
+            return False
+        current_index = TASK_STAGES.index(self.stage)
+        wanted_index = TASK_STAGES.index(wanted)
+        if wanted_index < current_index:
             return False
         step = _clean(payload.get("current_step"))
         expected = _clean(payload.get("expected_action"))
-        self.transition(wanted, step or self.current_step,
-                        expected or self.expected_action)
+        # Даже если один ответ закончил несколько фаз, внутри автомата они
+        # проходятся последовательно — прямого ребра planning → done нет.
+        while self.stage != wanted:
+            self.transition(self.next_stage)
+        self.update(step or self.current_step, expected or self.expected_action)
         if payload.get("paused") is True:
             self.pause()
         return True
@@ -226,3 +238,39 @@ def split_task_directive(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
     except (TypeError, ValueError):
         return (text or "").strip(), None
     return visible, payload if isinstance(payload, dict) else None
+
+
+def parse_task_update(text: str) -> Optional[Dict[str, Any]]:
+    """Разобрать чистый JSON контролёра с допуском на markdown fence."""
+    value = (text or "").strip()
+    if value.startswith("```") and value.endswith("```"):
+        lines = value.splitlines()
+        value = "\n".join(lines[1:-1]).strip()
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def state_review_messages(state: TaskState, objective: str,
+                          answer: str) -> list:
+    """Запрос независимому контролёру, когда основной ответ не сменил этап."""
+    clipped = (answer or "")[:STATE_REVIEW_MAX_CHARS]
+    system = (
+        "Ты контролёр конечного автомата задачи. Верни только один JSON-объект "
+        "с полями stage, current_step, expected_action, paused. Определи этап, "
+        "фактически достигнутый после ответа ассистента: planning — существует "
+        "только план; execution — результат ещё создаётся; validation — "
+        "запрошенный результат уже создан и теперь должен быть проверен; done — "
+        "результат создан и проверен. Не оставляй execution ради необязательных "
+        "улучшений. paused=true допустим только при обязательном вопросе к "
+        "пользователю. Не добавляй markdown и пояснения.")
+    user = (
+        "Исходная задача:\n{}\n\nТекущее состояние:\n"
+        "stage={}\ncurrent_step={}\nexpected_action={}\n\n"
+        "Последний ответ ассистента:\n{}".format(
+            _clean(objective) or state.current_step, state.stage,
+            state.current_step, state.expected_action, clipped))
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user}]

@@ -32,7 +32,14 @@ from .memory import LONG_TERM, SHORT_TERM, WORKING, LongTermMemory, WorkingMemor
 from .registry import SHARED, ClientRegistry, Credentials, resolve_credentials
 from .result import AgentResult
 from .tools import Toolbox, ToolOutcome
-from .task_state import AUTOMATIC_CONTROL, TaskState, split_task_directive
+from .task_state import (
+    AUTOMATIC_CONTROL,
+    TASK_STAGES,
+    TaskState,
+    parse_task_update,
+    split_task_directive,
+    state_review_messages,
+)
 from .transport import (
     Completion,
     ToolCall,
@@ -59,6 +66,9 @@ FACTS_MAX_TOKENS = 500
 # неудач подряд. Предел нужен, чтобы после долгого разговора с недоступным
 # провайдером картотека не замолчала навсегда.
 MAX_FACTS_PAUSE = 16
+
+# Контролёр состояния отвечает одним коротким JSON-объектом.
+TASK_REVIEW_MAX_TOKENS = 240
 
 
 class Agent:
@@ -1050,6 +1060,9 @@ class Agent:
                 attempt, "попытку" if attempt == 1 else "попытки",
                 validation.failure_summary()))
 
+        if self.automatic_task_state:
+            task_update = self._review_task_update(task_update, text, question)
+
         result = AgentResult(
             agent=self._config.name, provider=provider.name, model=model.id,
             text=text, data=validation.data, validation=validation, attempts=attempt,
@@ -1090,6 +1103,40 @@ class Agent:
         if self._config.judge is not None:
             self._apply_judge(result, question)
         return result
+
+    def _review_task_update(self, update: Optional[Dict[str, Any]],
+                            answer: str, question: str) -> Optional[Dict[str, Any]]:
+        """Уточнить состояние отдельным запросом, если основной ответ застрял.
+
+        Основная модель обычно возвращает переход вместе с ответом. Контролёр
+        нужен, когда директивы нет или она оставляет прежний этап: именно так
+        готовое решение раньше могло бесконечно числиться execution.
+        """
+        state = self.task_state
+        if not state.active or state.paused or state.stage == TASK_STAGES[-1]:
+            return update
+        if isinstance(update, dict) and update.get("paused") is True:
+            return update
+        wanted = str((update or {}).get("stage") or "").strip().lower()
+        if wanted in TASK_STAGES:
+            if TASK_STAGES.index(wanted) > TASK_STAGES.index(state.stage):
+                return update
+
+        objective = ""
+        for message in self.conversation.messages:
+            if message.role == "user" and not message.note:
+                objective = message.content
+                break
+        objective = objective or question or state.current_step
+        try:
+            reviewed = self._call(
+                state_review_messages(state, objective, answer), kind=SIDE,
+                max_tokens=TASK_REVIEW_MAX_TOKENS, temperature=0.0,
+                stop=[], response_format={})
+            candidate = parse_task_update(reviewed.text)
+        except Exception:  # noqa: BLE001 — полученный основной ответ не теряем
+            return update
+        return candidate or update
 
     def _apply_judge(self, result: AgentResult, question: str) -> None:
         """Оценить ответ. Оценка — украшение: из-за неё запрос не пропадает.
