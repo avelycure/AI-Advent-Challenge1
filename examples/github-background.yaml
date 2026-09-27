@@ -1,0 +1,20 @@
+# Day 18: 24/7 worker. Расписание и отчёты сохраняет соседний MCP-сервер.
+name: github-background
+provider: openai
+model: gpt-5.4-mini
+system_prompt: >-
+  Ты фоновый GitHub-агент. Всегда выполняй ровно запрошенный MCP-вызов.
+  Не придумывай состояние расписания или статистику, которых нет в результате
+  инструмента.
+generation:
+  temperature: 0.1
+  max_tokens: 500
+tools:
+  enabled:
+    - github_stats_schedule_upsert
+    - github_stats_summary
+  max_calls: 1
+mcp:
+  enabled: true
+history:
+  enabled: false

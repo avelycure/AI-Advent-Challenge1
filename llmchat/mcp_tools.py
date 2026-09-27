@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -94,8 +95,67 @@ def _client_path() -> pathlib.Path:
     return path.resolve()
 
 
+def _stop_process(process: subprocess.Popen) -> None:
+    """Остановить transport-процесс, не оставляя его после отмены/timeout."""
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        process.communicate(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.communicate()
+
+
+def _run_cancellable(command: Sequence[str], stdin: Optional[str], timeout: float,
+                     environment: Dict[str, str], cwd: str,
+                     cancel_event) -> subprocess.CompletedProcess:
+    """Запустить bridge с кооперативной отменой для daemon shutdown."""
+    if cancel_event.is_set():
+        raise AgentError("MCP-вызов отменён")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            cwd=cwd,
+        )
+    except OSError as exc:
+        raise AgentError("не удалось запустить MCP-клиент: {}".format(exc)) from exc
+
+    started = time.monotonic()
+    pending_input = stdin
+    while True:
+        if cancel_event.is_set():
+            _stop_process(process)
+            raise AgentError("MCP-вызов отменён")
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            _stop_process(process)
+            raise AgentError(
+                "MCP-сервер не ответил за {} секунд".format(int(timeout)))
+        try:
+            stdout, stderr = process.communicate(
+                input=pending_input,
+                timeout=min(0.1, remaining),
+            )
+            return subprocess.CompletedProcess(
+                command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            # communicate() можно безопасно продолжить после TimeoutExpired,
+            # но stdin разрешено передать только при первом вызове.
+            pending_input = None
+
+
 def _invoke(arguments: Sequence[str], timeout: float = TIMEOUT_SECONDS,
-            stdin: Optional[str] = None) -> Dict[str, object]:
+            stdin: Optional[str] = None, cancel_event=None) -> Dict[str, object]:
     """Вызвать JSON CLI-мост, не передавая секреты в argv."""
     client = _client_path()
     if not client.is_file():
@@ -108,21 +168,29 @@ def _invoke(arguments: Sequence[str], timeout: float = TIMEOUT_SECONDS,
         "PATH": os.environ.get("PATH", os.defpath),
         URL_ENV: os.environ.get(URL_ENV, DEFAULT_URL),
     }
-    try:
-        finished = subprocess.run(
-            ["node", "--max-old-space-size=64", str(client), *arguments, "--json"],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=environment,
-            cwd=str(client.parent.parent),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise AgentError(
-            "MCP-сервер не ответил за {} секунд".format(int(timeout))) from exc
-    except OSError as exc:
-        raise AgentError("не удалось запустить MCP-клиент: {}".format(exc)) from exc
+    command = [
+        "node", "--max-old-space-size=64", str(client), *arguments, "--json"]
+    if cancel_event is not None:
+        finished = _run_cancellable(
+            command, stdin, timeout, environment, str(client.parent.parent),
+            cancel_event)
+    else:
+        try:
+            finished = subprocess.run(
+                command,
+                input=stdin,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=environment,
+                cwd=str(client.parent.parent),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AgentError(
+                "MCP-сервер не ответил за {} секунд".format(int(timeout))) from exc
+        except OSError as exc:
+            raise AgentError(
+                "не удалось запустить MCP-клиент: {}".format(exc)) from exc
 
     if len(finished.stdout) > MAX_OUTPUT_CHARS:
         raise AgentError("MCP-клиент вернул слишком большой ответ")
@@ -217,27 +285,38 @@ def placeholder_specs(names: Iterable[str]) -> List[ToolSpec]:
     ]
 
 
+def call_tool(name: str, arguments: Dict[str, object],
+              timeout: float = TIMEOUT_SECONDS, cancel_event=None) -> ToolOutcome:
+    """Вызвать MCP напрямую, когда решение уже принял не LLM, а supervisor."""
+    if not TOOL_NAME_PATTERN.fullmatch(name):
+        raise AgentError("некорректное имя MCP-инструмента")
+    if not isinstance(arguments, dict):
+        raise AgentError("аргументы MCP-инструмента должны быть объектом")
+    payload = _invoke([
+        "--tool", name,
+        "--arguments-stdin",
+    ], timeout=timeout, stdin=json.dumps(arguments, ensure_ascii=False),
+        cancel_event=cancel_event)
+    result = payload.get("result")
+    if result is None:
+        blocks = payload.get("content") or []
+        text = "\n".join(
+            str(block.get("text", "")) for block in blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    else:
+        text = json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+    return ToolOutcome(
+        text or "MCP-инструмент вернул пустой результат.",
+        detail={"mcp_url": _safe_url(os.environ.get(URL_ENV, DEFAULT_URL)),
+                "structured_content": result},
+    )
+
+
 def _handler(name: str):
     def call(arguments: Dict[str, object]) -> ToolOutcome:
-        payload = _invoke([
-            "--tool", name,
-            "--arguments-stdin",
-        ], stdin=json.dumps(arguments, ensure_ascii=False))
-        result = payload.get("result")
-        if result is None:
-            blocks = payload.get("content") or []
-            text = "\n".join(
-                str(block.get("text", "")) for block in blocks
-                if isinstance(block, dict) and block.get("type") == "text"
-            ).strip()
-        else:
-            text = json.dumps(result, ensure_ascii=False, sort_keys=True)
-
-        return ToolOutcome(
-            text or "MCP-инструмент вернул пустой результат.",
-            detail={"mcp_url": _safe_url(os.environ.get(URL_ENV, DEFAULT_URL)),
-                    "structured_content": result},
-        )
+        return call_tool(name, arguments)
 
     return call
 
