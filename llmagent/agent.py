@@ -340,6 +340,10 @@ class Agent:
         """
         updated = self._config.with_changes(**changes)
         updated.resolve()
+        if "mcp" in changes and updated.mcp != self._config.mcp:
+            raise ConfigError(
+                "mcp: подключение задаётся при создании агента и не меняется "
+                "в уже запущенном диалоге")
         # Инструменты проверяем до того, как конфиг применён: иначе неверное
         # имя оставляло бы агента с новым конфигом и прежним набором.
         tools = self._all_tools.only(updated.tools.enabled) if "tools" in changes else None

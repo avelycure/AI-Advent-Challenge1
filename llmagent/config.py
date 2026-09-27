@@ -156,6 +156,13 @@ class ToolPolicy:
         return bool(self.enabled)
 
 
+@dataclass(frozen=True)
+class MCPConfig:
+    """Подключать ли каталог инструментов локального MCP-сервера."""
+
+    enabled: bool = False
+
+
 # Меньше этого окно сужать бессмысленно: в него не влезет даже системный
 # промпт с одним вопросом, и любой запрос отвергался бы ещё до отправки.
 MIN_WINDOW = 256
@@ -335,6 +342,7 @@ class AgentConfig:
     output: OutputPolicy = field(default_factory=OutputPolicy)
     judge: Optional[JudgeConfig] = None
     tools: ToolPolicy = field(default_factory=ToolPolicy)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     budget: Budget = field(default_factory=Budget)
     transport: Transport = field(default_factory=Transport)
@@ -512,6 +520,7 @@ _NESTED: Dict[str, Any] = {
     "output": OutputPolicy,
     "judge": JudgeConfig,
     "tools": ToolPolicy,
+    "mcp": MCPConfig,
     "history": HistoryConfig,
     "facts": FactsConfig,
     "compression": CompressionConfig,

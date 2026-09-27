@@ -1,0 +1,20 @@
+# Агент с доступом к read-only статистике GitHub через локальный MCP-сервер.
+# Перед запуском поднимите AI-Advent-MCP/mcp1: npm run server.
+name: github-mcp
+provider: openai
+model: gpt-5.4-mini
+system_prompt: >-
+  Ты анализируешь GitHub-аккаунт. Для вопросов о репозиториях обязательно
+  используй github_repository_stats, а затем объясняй полученные числа кратко
+  и по-русски. Не придумывай статистику, которой нет в результате инструмента.
+generation:
+  temperature: 0.2
+  max_tokens: 800
+tools:
+  enabled:
+    - github_repository_stats
+  max_calls: 2
+mcp:
+  enabled: true
+history:
+  enabled: false

@@ -27,8 +27,10 @@ from rich.table import Table
 from rich.text import Text
 
 from llmagent import (
+    AgentError,
     AgentConfig,
     ConfigError,
+    SPAWN_AGENT,
     ToolOutcome,
     Toolbox,
     overrides,
@@ -38,6 +40,7 @@ from llmagent.tools import USAGE_KEY
 from llmagent.registry import EXTRA_ENV
 
 from .ui import fmt, format_cost, format_seconds
+from . import mcp_tools
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIGS_DIR = ROOT / "configs"
@@ -290,7 +293,7 @@ def panel(delegation: Delegation, remembered: bool = True) -> RenderableType:
 # --------------------------------------------------------------------------
 
 def toolbox_for(parent: AgentConfig) -> Toolbox:
-    """Набор инструментов агента: пока в нём один — запуск под-агента.
+    """Набор локальных и MCP-инструментов агента.
 
     Что инструмент делает, знает интерфейс: под-агент идёт отдельным процессом.
     Какие инструменты включены — говорит конфиг агента.
@@ -312,7 +315,19 @@ def toolbox_for(parent: AgentConfig) -> Toolbox:
         return ToolOutcome(answer, detail={"delegation": delegation,
                                            USAGE_KEY: spending_of(delegation)})
 
-    return Toolbox([spawn_agent_spec(available(), handler)])
+    specs = [spawn_agent_spec(available(), handler)]
+    if parent.mcp.enabled:
+        # Успешно загруженный полный каталог сохраняется в Agent._all_tools,
+        # поэтому его инструменты можно включать через reconfigure. При offline
+        # startup placeholders создаются только для уже включённых имён.
+        try:
+            specs.extend(mcp_tools.specs_for(
+                timeout=mcp_tools.STATUS_TIMEOUT_SECONDS))
+        except AgentError:
+            remote_names = (
+                name for name in parent.tools.enabled if name != SPAWN_AGENT)
+            specs.extend(mcp_tools.placeholder_specs(remote_names))
+    return Toolbox(specs)
 
 
 def spending_of(delegation: Delegation) -> Dict[str, object]:

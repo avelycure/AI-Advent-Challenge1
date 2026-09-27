@@ -45,7 +45,7 @@ from llmagent.params import SPECS, GenerationParams, apply, format_value, parse_
 from llmagent.transport import tokenizer_name
 from llmagent.usage import JUDGE, MAIN, REPAIR, SIDE
 
-from . import subagent, switching
+from . import mcp_tools, subagent, switching
 from .session import DEFAULT_TOPIC, Session
 from .ui import (
     branches_panel,
@@ -342,6 +342,63 @@ def config_panel(session: Session) -> RenderableType:
                  title_align="left", border_style="green", box=box.ROUNDED, padding=(0, 1))
 
 
+def mcp_panel(session: Session) -> RenderableType:
+    """Настроенные MCP-серверы, их доступность и опубликованные инструменты."""
+    status = mcp_tools.connection_status(session.agent.config.mcp.enabled)
+    table = Table(box=box.SIMPLE_HEAVY, expand=True, pad_edge=False)
+    table.add_column("Сервер", style="bold")
+    table.add_column("Адрес")
+    table.add_column("Статус", no_wrap=True)
+    table.add_column("Инструментов", justify="right", no_wrap=True)
+
+    labels = {
+        "connected": Text("● доступен", style="bold green"),
+        "disabled": Text("○ отключён", style="dim"),
+        "unavailable": Text("● недоступен", style="bold red"),
+    }
+    server_name = status.name
+    if status.version:
+        server_name += " v{}".format(status.version)
+    table.add_row(
+        Text(server_name),
+        Text(status.url, style="cyan"),
+        labels.get(status.state, Text(status.state)),
+        str(len(status.tools)) if status.state == "connected" else "—",
+    )
+
+    blocks = [table]
+    if status.state == "connected" and status.tools:
+        tools = Table(box=box.SIMPLE, expand=True, pad_edge=False)
+        tools.add_column("Инструмент", style="bold cyan", no_wrap=True)
+        tools.add_column("Включён", justify="center", no_wrap=True)
+        enabled = set(session.agent.config.tools.enabled)
+        for tool in status.tools:
+            tools.add_row(
+                Text(tool.name),
+                Text("да" if tool.name in enabled else "нет"),
+            )
+        blocks.extend((Text(""), tools))
+    elif status.state == "disabled":
+        blocks.append(Text.from_markup(
+            "\n[dim]MCP отключён в конфиге: [cyan]mcp.enabled: false[/].[/]"))
+    elif status.error:
+        blocks.append(Text("\nОшибка проверки: " + status.error, style="red"))
+    if status.state != "disabled":
+        blocks.append(Text(
+            "\nСтатус проверяет MCP-соединение и tools/list, но не токен GitHub API.",
+            style="dim",
+        ))
+
+    return Panel(
+        Group(*blocks),
+        title="🔌 MCP-подключения",
+        title_align="left",
+        border_style="green" if status.state == "connected" else "yellow",
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+
+
 def price_label(provider, model) -> str:
     """Цена текущей модели: вход и выход за миллион токенов."""
     if provider.free:
@@ -549,6 +606,9 @@ def chat_loop(console: Console, keys, session: Session,
                 continue
             if command == "/config":
                 notice = config_panel(session)
+                continue
+            if command == "/mcp":
+                notice = mcp_panel(session)
                 continue
             if command in ("/rename", "/name"):
                 notice = rename_session(session, argument)

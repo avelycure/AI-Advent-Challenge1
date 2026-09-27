@@ -32,6 +32,8 @@ output:
   max_attempts: 1
   require_valid: false
 judge: null
+mcp:
+  enabled: false      # MCP-каталог подключается только при создании агента
 history:
   enabled: true
   keep_last_answer: true
